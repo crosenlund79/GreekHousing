@@ -1,6 +1,7 @@
 # CLAUDE.md
 
-Godot 4 (GDScript) prototype that generates Olynthian pastas-type Greek house plans.
+Godot 4 (GDScript) prototype that subdivides a user-drawn city block into 5–6
+Olynthian pastas-type Greek houses and shows them together in 3D.
 
 ## Commands
 
@@ -14,38 +15,58 @@ Godot 4 (GDScript) prototype that generates Olynthian pastas-type Greek house pl
 
 - Hard rules H00–H12 are absolute (H00 = 4–6-sided simple footprint polygon,
   H11 = no footprint interior angle in [80°, 110°], inclusive, H12 = entrance
-  directly on the street frontage, H12.1 = frontage ≥ 2.0 m continuous). Never weaken, skip or bypass a validator
-  check to make generation succeed; fix the generator instead.
-- Only houses for which `house_validator.gd::validate_house` returns
-  `valid == true` may be displayed as plans. Failures show an error slot.
-- Retries are bounded (`MAX_ATTEMPTS = 10` in `house_generator.gd`).
-- Keep generation, validation and rendering separate: the validator works only on
-  the house Dictionary; `house_view.gd` only draws it.
-- One geometry model: the house Dictionary. Generator, validator, 3D view, 2D
-  plan and coordinate schematic all read it; measurements go through
-  `scripts/geometry.gd` (area, edges, angles, point-in-polygon, local
-  coordinates, world→screen). Never keep a second copy of the geometry.
+  directly on the street frontage, H12.1 = frontage ≥ 2.0 m continuous), and so
+  are the block rules B00–B07 (`block_validator.gd`: 5 or 6 houses, inside the
+  block, no overlaps, no shared spaces/courtyards, entrances on the block
+  perimeter, one shared north). Never weaken, skip or bypass a validator check
+  to make generation succeed; fix the generator instead.
+- The app is a city-block generator: the user draws the block polygon, every
+  block edge is a street, and `block_generator.gd` subdivides it into 5 or 6
+  plots (6 tried first) with one house each. Never fall back to a standalone
+  house view or "House 1/5" navigation; never add shared passages, communal
+  courtyards or open spaces.
+- Only a block whose `validate_block` result is `valid == true` (which includes
+  `validate_house` for every house) may be displayed. Failures show
+  "GENERATION FAILED" with the reason and no houses.
+- Attempts are bounded: `LAYOUT_ATTEMPTS = 30` per house count and
+  `HOUSE_ATTEMPTS = 10` per plot (`block_generator.gd`); `MAX_ATTEMPTS = 10`
+  for the standalone generator. Generation is deterministic per outline and
+  seed: use the passed `RandomNumberGenerator`, never `Array.shuffle()`,
+  `randf()` or `randi()`.
+- Keep generation, validation and rendering separate: validators work only on
+  the block/house Dictionaries; views only draw them.
+- One geometry model: the block Dictionary `{polygon, houses, plots, seed,
+  validation}`, houses in global coordinates (never rotated). Generator,
+  validators, drawing canvas, 3D view and coordinate schematic all read it;
+  measurements go through `scripts/geometry.gd` (area, edges, angles,
+  point-in-polygon, local coordinates, world→screen). Never keep a second copy
+  of the geometry.
 - Validate against actual geometry, never metadata: side count from the polygon,
-  northern wing from the rooms north of the pastas, areas from shapes.
-- UI: five houses are generated at startup and on "Regenerate All Houses" only.
-  ◀ / ▶ just change `main.index` (wrapping) and rebuild the 3D model of the
-  selected house; they must never regenerate. Rotation only moves the camera.
-  "Show Coordinates" / "Back to 3D" / "2D Plan" only change `main.mode`; they
-  never regenerate or rebuild, and the selected house stays selected.
-- The 3D view (`house_3d_view.gd`) builds meshes only from validated data
-  (`validation.valid`), one floor per space, one solid per wall record — never
-  invent walls or roofs. Only the selected house's meshes exist.
+  northern wing from the rooms north of the pastas, areas from shapes,
+  entrances on the block perimeter from the entrance's outer face.
+- UI: "Generate City Block" / "Regenerate Houses" are the only things that
+  generate (Regenerate keeps the drawn polygon); "Draw New Block" clears.
+  Selecting a house, rotation and "Show Coordinates" / "Back to 3D" /
+  "Block Coordinates" / "Selected House" never regenerate or rebuild the 3D
+  model, and the selected house stays selected.
+- The 3D view (`house_3d_view.gd`) shows all houses of the block in one model,
+  built only from validated data, one floor per space, one solid per wall
+  record — never invent walls or roofs. Selection only rebuilds the overlay.
 
 ## Conventions
 
 - Metres, X east, Y south, north up. Interior geometry is axis-aligned `Rect2`;
   the footprint is a `PackedVector2Array`; items that are not rectangles (clipped
   room, mitred exterior wall quads) add an exact `poly` and keep `rect` as bbox.
-- North and south faces stay horizontal; east/west sides are "slant" (one side,
-  tilt 21.5–24°) or "vee" (inward point on an E–W wall line, tilt ≥ 12°).
-  4 = slant+slant, 5 = vee+slant, 6 = vee+vee. Outer rooms are widened by the
-  intrusion, then spaces/walls are clipped to the interior polygon. Never clip
-  the courtyard, entrance passage or door gaps.
+- Block plots: one row ("through") or a north and a south row split by an E–W
+  row line on the 5 cm grid; party walls tilted 22–42° from N–S (never 90°
+  corners); block ends that do not fit stay unbuilt corner ground. North-row
+  houses enter from the north street through a wing passage; south/through
+  houses from the south street through a street-range passage.
+- Standalone houses: north and south faces horizontal; east/west sides "slant"
+  (tilt 21.5–24°) or "vee" (inward point on an E–W wall line, tilt ≥ 12°).
+- Outer rooms are widened by the intrusion, then spaces/walls are clipped to
+  the interior polygon. Never clip the courtyard, entrance passage or door gaps.
 - Spaces, walls and door gaps tile the footprint exactly; openings are flush
   between the two spaces they join (`axis` = direction of travel).
 - The generator works on an integer centimetre grid (5 cm steps) and emits metres.

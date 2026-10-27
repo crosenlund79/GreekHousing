@@ -1,33 +1,35 @@
 extends Control
-## Main screen: five stored, validated houses shown one at a time, as a 3D
-## cutaway (default), the 2D plan or the coordinate schematic. All three views
-## draw the same stored house Dictionary; switching views never regenerates or
-## changes it, and the selected house stays selected.
-## Navigation only changes which stored house is displayed (and rebuilds the
-## 3D model for it); only "Regenerate All Houses" generates and validates new
-## data. Camera rotation never regenerates or rebuilds anything.
+## Ancient Greek city-block generator: main screen and workflow.
+##
+## 1. Draw the block outline (click corners, click the first corner to close).
+## 2. "Generate City Block" subdivides it into 5 or 6 plots, builds a house in
+##    each and validates every house (H00–H12) and the whole block (B00–B07).
+## 3. All houses are shown together in one 3D cutaway; click a house to select
+##    it (the others stay visible). Rotate the camera with the buttons.
+## 4. "Show Coordinates" opens the coordinate schematic: block level, or the
+##    selected house. "Regenerate Houses" builds a new block in the same outline.
+## Every view reads the same block Dictionary; switching views never
+## regenerates anything, and only "VALID" blocks are ever displayed.
 
-const Generator := preload("res://scripts/house_generator.gd")
-const HouseView := preload("res://scripts/house_view.gd")
+const BG := preload("res://scripts/block_generator.gd")
+const DrawView := preload("res://scripts/block_draw_view.gd")
 const House3DView := preload("res://scripts/house_3d_view.gd")
 const SchematicView := preload("res://scripts/house_schematic_view.gd")
-const G := preload("res://scripts/geometry.gd")
-const HOUSE_COUNT := 5
 
-var houses: Array = []      # generate_valid_house() results, one per slot
-var index := 0
-var generation := 0         # number of times the five houses were (re)generated
-var mode := "3d"            # "3d", "plan" or "schematic"
+var mode := "draw"             # "draw", "3d" or "schematic"
+var schematic_level := "block" # "block" or "house"
+var polygon := PackedVector2Array()
+var block: Dictionary = {}     # the current validated block (or {})
+var selected := 0              # selected house index
+var generation := 0            # number of blocks generated (for tests)
+var last_reason := ""
+
+var draw_view: Control
 var view3d: SubViewportContainer
-var plan_view: Control
 var schematic: Control
-var counter: Label
 var info: Label
 var status: Label
-var rotate_buttons: Array = []
-var plan_button: Button
-var coords_button: Button
-var back_button: Button
+var buttons := {}
 
 
 func _ready() -> void:
@@ -42,7 +44,7 @@ func _ready() -> void:
 	add_child(root)
 
 	var title := Label.new()
-	title.text = "Ancient Greek House Generator"
+	title.text = "Ancient Greek City Block Generator"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_font_size_override("font_size", 22)
 	title.add_theme_color_override("font_color", Color(0.2, 0.16, 0.12))
@@ -54,32 +56,23 @@ func _ready() -> void:
 	bar.add_theme_constant_override("h_separation", 8)
 	bar.add_theme_constant_override("v_separation", 6)
 	root.add_child(bar)
-	var nav := HBoxContainer.new()
-	bar.add_child(nav)
-	nav.add_child(_button("◀", show_previous, Vector2(44, 34), "Previous house"))
-	counter = Label.new()
-	counter.custom_minimum_size = Vector2(96, 34)
-	counter.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	counter.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	counter.add_theme_font_size_override("font_size", 17)
-	counter.add_theme_color_override("font_color", Color(0.2, 0.16, 0.12))
-	nav.add_child(counter)
-	nav.add_child(_button("▶", show_next, Vector2(44, 34), "Next house"))
-	var turn := HBoxContainer.new()
-	bar.add_child(turn)
-	rotate_buttons = [
-		_button("↶ Rotate Left", rotate_left, Vector2(0, 34), "Turn the view 45° counter-clockwise"),
-		_button("Rotate Right ↷", rotate_right, Vector2(0, 34), "Turn the view 45° clockwise"),
-	]
-	for b in rotate_buttons:
-		turn.add_child(b)
-	bar.add_child(_button("Regenerate All Houses", regenerate_all, Vector2(0, 34), "Generate and validate five new houses"))
-	plan_button = _button("2D Plan", toggle_plan, Vector2(0, 34), "Show the 2D plan of the selected house")
-	bar.add_child(plan_button)
-	coords_button = _button("Show Coordinates", show_coordinates, Vector2(0, 34), "Technical schematic with coordinates of the selected house")
-	bar.add_child(coords_button)
-	back_button = _button("Back to 3D", back_to_3d, Vector2(0, 34), "Return to the 3D view of the selected house")
-	bar.add_child(back_button)
+	for spec in [
+			["draw", "Draw New Block", draw_new_block, "Clear and draw a new block outline"],
+			["generate", "Generate City Block", generate_pressed, "Subdivide the drawn block into 5 or 6 houses"],
+			["regenerate", "Regenerate Houses", regenerate_pressed, "A new set of houses in the same block"],
+			["left", "↶ Rotate Left", rotate_left, "Turn the view 45° counter-clockwise"],
+			["right", "Rotate Right ↷", rotate_right, "Turn the view 45° clockwise"],
+			["coords", "Show Coordinates", show_coordinates, "Coordinate schematic of the block and the selected house"],
+			["back", "Back to 3D", back_to_3d, "Return to the 3D city view"],
+			["level_block", "Block Coordinates", show_block_coordinates, "Block outline, plots, party walls and entrances"],
+			["level_house", "Selected House", show_house_coordinates, "Rooms, walls and doors of the selected house"]]:
+		var b := Button.new()
+		b.text = spec[1]
+		b.custom_minimum_size = Vector2(0, 34)
+		b.tooltip_text = spec[3]
+		b.pressed.connect(spec[2])
+		bar.add_child(b)
+		buttons[spec[0]] = b
 
 	info = Label.new()
 	info.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -91,81 +84,109 @@ func _ready() -> void:
 	stage.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	stage.custom_minimum_size = Vector2(200, 180)
 	root.add_child(stage)
+	draw_view = DrawView.new()
+	draw_view.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	draw_view.polygon_closed.connect(_on_polygon_closed)
+	draw_view.house_clicked.connect(select_house)
+	draw_view.message.connect(func(t): _set_info(t, false))
+	stage.add_child(draw_view)
 	view3d = House3DView.new()
 	view3d.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	view3d.house_clicked.connect(select_house)
 	stage.add_child(view3d)
-	plan_view = Control.new()
-	plan_view.set_script(HouseView)
-	plan_view.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	stage.add_child(plan_view)
 	schematic = SchematicView.new()
 	schematic.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	schematic.house_clicked.connect(select_house)
 	stage.add_child(schematic)
 
 	status = Label.new()
 	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	status.add_theme_font_size_override("font_size", 11)
 	status.add_theme_color_override("font_color", Color(0.3, 0.26, 0.22))
+	status.text = ("Classical Greek pastas houses after the Olynthian type, built together in one block; every block edge is a street. "
+		+ "Walls are cut away at 0.8 m to show the plans. The 16 m² courtyard, footprint rules and all dimensions are project constraints, not ancient standards.")
 	root.add_child(status)
 
-	regenerate_all()
+	draw_new_block()
 
 
-func _button(text: String, action: Callable, min_size: Vector2, tip: String) -> Button:
-	var b := Button.new()
-	b.text = text
-	b.custom_minimum_size = min_size
-	b.tooltip_text = tip
-	b.pressed.connect(action)
-	return b
+# --------------------------------------------------------------------------
+# Workflow
+# --------------------------------------------------------------------------
+
+func draw_new_block() -> void:
+	polygon = PackedVector2Array()
+	block = {}
+	selected = 0
+	view3d.clear()
+	draw_view.reset()
+	mode = "draw"
+	_set_info("Click to place the corners of the block; click the first corner to close it.", false)
+	_refresh()
 
 
-## Generates and validates five new houses, replacing the stored ones.
-func regenerate_all() -> void:
+## Called when the drawn outline is closed (by the canvas, or by tests).
+func _on_polygon_closed(poly: PackedVector2Array) -> void:
+	polygon = poly
+	var problem := BG.check_block_polygon(poly)
+	if problem != "":
+		_set_info("This block cannot be used: %s." % problem, true)
+	else:
+		_set_info("Block closed: %d corners, %.0f m². Press \"Generate City Block\"." % [poly.size(), BG.G.polygon_area(poly)], false)
+	_refresh()
+
+
+func generate_pressed() -> void:
+	await _generate_after_frame()
+
+
+func regenerate_pressed() -> void:
+	await _generate_after_frame()
+
+
+func _generate_after_frame() -> void:
+	_set_info("Generating and validating the city block…", false)
+	await get_tree().process_frame
+	generate(randi() % 1000000)
+
+
+## Subdivides the drawn polygon, builds and validates the block. Only a block
+## that passes every check is kept and shown; otherwise the reason is shown.
+func generate(block_seed: int) -> bool:
+	if polygon.size() < 3 or BG.check_block_polygon(polygon) != "":
+		return false
 	var t0 := Time.get_ticks_usec()
-	var base_seed := randi() % 1000000
-	var seen := {}
-	for old in houses:
-		if old["ok"]:
-			seen[_signature(old["house"])] = true   # new set must differ from the old one
-	var fresh: Array = []
-	var valid := 0
-	var rejected := 0
-	for i in HOUSE_COUNT:
-		var result := {}
-		# Re-roll (bounded) if a seed happens to repeat an existing plan.
-		for k in 5:
-			result = Generator.generate_valid_house(base_seed + i * 7919 + k * 104729)
-			rejected += result["rejections"].size()
-			if not result["ok"] or not seen.has(_signature(result["house"])):
-				break
-		if result["ok"]:
-			seen[_signature(result["house"])] = true
-			valid += 1
-		fresh.append(result)
-	houses = fresh
-	generation += 1
-	index = 0
-	_show_current()
+	var res := BG.generate_block(polygon, block_seed)
 	var ms := (Time.get_ticks_usec() - t0) / 1000.0
-	status.text = ("%d/%d houses valid (H00–H12) · %d candidates rejected · generated, validated and built in %.1f ms · base seed %d.  "
-		+ "Classical Greek pastas houses after the Olynthian type; street to the south. Walls are cut away at 0.8 m to show the plan. "
-		+ "The 16 m² courtyard, footprint shapes and all dimensions are project constraints, not ancient standards.") \
-		% [valid, HOUSE_COUNT, rejected, ms, base_seed]
+	generation += 1
+	if not res["ok"]:
+		block = {}
+		view3d.clear()
+		last_reason = res["reason"]
+		mode = "draw"
+		draw_view.show_block({}, -1)
+		_set_info("GENERATION FAILED — %s. Try \"Regenerate Houses\" or draw a broader block (long sides roughly east–west)." % res["reason"], true)
+		_refresh()
+		return false
+	block = res["block"]
+	selected = 0
+	draw_view.show_block(block, selected)
+	view3d.show_block(block, selected)
+	mode = "3d"
+	_set_info("", false)
+	_refresh()
+	status.text = "%d houses generated and validated in %.0f ms (%d layouts tried, seed %d). " % [block["houses"].size(), ms, res["attempts"], block_seed] \
+		+ "Every block edge is a street; each house has its own entrance on it. Walls cut away at 0.8 m; dimensions are project constraints."
+	return true
 
 
-func show_next() -> void:
-	if houses.is_empty():
+func select_house(index: int) -> void:
+	if block.is_empty() or index < 0 or index >= block["houses"].size():
 		return
-	index = (index + 1) % houses.size()
-	_show_current()
-
-
-func show_previous() -> void:
-	if houses.is_empty():
-		return
-	index = (index - 1 + houses.size()) % houses.size()
-	_show_current()
+	selected = index
+	view3d.set_selected(index)
+	draw_view.show_block(block, index)
+	_refresh()
 
 
 func rotate_left() -> void:
@@ -176,53 +197,72 @@ func rotate_right() -> void:
 	view3d.rotate_view(1)
 
 
-func toggle_plan() -> void:
-	mode = "3d" if mode == "plan" else "plan"
-	_show_current()
-
-
 func show_coordinates() -> void:
+	if block.is_empty():
+		return
 	mode = "schematic"
-	_show_current()
+	_refresh()
 
 
 func back_to_3d() -> void:
+	if block.is_empty():
+		return
 	mode = "3d"
-	_show_current()
+	_refresh()
 
 
-## Displays the selected stored house. Only a validated house reaches the 3D
-## view; a failed slot shows the generation error panel instead.
-func _show_current() -> void:
-	var result: Dictionary = houses[index]
-	var valid: bool = result["ok"] and result["house"].get("validation", {}).get("valid", false)
-	counter.text = "House %d / %d" % [index + 1, houses.size()]
-	plan_view.show_result(result, index + 1, houses.size())
-	# Each view only rebuilds when the house itself changes (show_house checks identity).
-	var shown_3d: bool = valid and view3d.show_house(result["house"])
-	if not valid:
-		view3d.clear()
-	var shown_schematic: bool = valid and schematic.show_house(result["house"], counter.text)
-	view3d.visible = shown_3d and mode == "3d"
-	schematic.visible = shown_schematic and mode == "schematic"
-	plan_view.visible = not view3d.visible and not schematic.visible
-	for b in rotate_buttons:
-		b.disabled = not view3d.visible
-	plan_button.visible = mode != "plan"
-	coords_button.visible = mode != "schematic"
-	coords_button.disabled = not valid
-	back_button.visible = mode != "3d"
-	if valid:
-		var h: Dictionary = result["house"]
-		var fp_box := G.bbox(h["footprint"])
-		info.text = "VALID H00–H12 · %d exterior sides (%s) · %d rooms · %.1f × %.1f m · seed %d" % [
-			h["validation"]["sides"], h["shape"], h["spaces"].filter(func(s): return s["kind"] == "room").size(),
-			fp_box.size.x, fp_box.size.y, h["seed"]]
+func show_block_coordinates() -> void:
+	schematic_level = "block"
+	show_coordinates()
+
+
+func show_house_coordinates() -> void:
+	schematic_level = "house"
+	show_coordinates()
+
+
+# --------------------------------------------------------------------------
+# Display
+# --------------------------------------------------------------------------
+
+func _refresh() -> void:
+	var has_block := not block.is_empty()
+	var closed: bool = draw_view.closed and BG.check_block_polygon(polygon) == ""
+	if mode != "draw" and not has_block:
+		mode = "draw"
+	draw_view.visible = mode == "draw"
+	view3d.visible = mode == "3d"
+	schematic.visible = mode == "schematic"
+	if mode == "schematic":
+		if schematic_level == "block":
+			schematic.show_block(block, selected)
+		else:
+			schematic.show_house(block["houses"][selected], "House %d of %d" % [selected + 1, block["houses"].size()])
+	buttons["generate"].disabled = not closed or has_block
+	buttons["regenerate"].disabled = not closed
+	buttons["left"].disabled = mode != "3d"
+	buttons["right"].disabled = mode != "3d"
+	buttons["coords"].visible = mode != "schematic"
+	buttons["coords"].disabled = not has_block
+	buttons["back"].visible = mode == "schematic" or (mode == "draw" and has_block)
+	buttons["level_block"].visible = mode == "schematic"
+	buttons["level_house"].visible = mode == "schematic"
+	buttons["level_block"].disabled = schematic_level == "block"
+	buttons["level_house"].disabled = schematic_level == "house"
+	if has_block and info.get_meta("sticky", false) == false:
+		var v: Dictionary = block["validation"]
+		var h: Dictionary = block["houses"][selected]
+		info.text = "VALID CITY BLOCK · %d houses (B00–B07, H00–H12 each) · selected: House %d — %d sides, %.1f m², courtyard 16.0 m², entrance on the %s street" % [
+			block["houses"].size(), selected + 1, h["validation"]["sides"], BG.G.polygon_area(h["footprint"]), h["street_side"]]
+		if v["residual_area"] > 1.0:
+			info.text += " · unbuilt corner ground %.0f m²" % v["residual_area"]
 		info.add_theme_color_override("font_color", Color(0.15, 0.42, 0.2))
+
+
+func _set_info(text: String, error: bool) -> void:
+	info.set_meta("sticky", text != "")
+	if text != "":
+		info.text = text
+		info.add_theme_color_override("font_color", Color(0.7, 0.15, 0.12) if error else Color(0.2, 0.16, 0.12))
 	else:
-		info.text = "GENERATION ERROR — no valid house for this slot; nothing is displayed as a house."
-		info.add_theme_color_override("font_color", Color(0.7, 0.15, 0.12))
-
-
-static func _signature(house: Dictionary) -> String:
-	return str(house["footprint"]) + str(house["spaces"].map(func(s): return s["rect"]))
+		info.set_meta("sticky", false)

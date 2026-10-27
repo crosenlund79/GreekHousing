@@ -1,35 +1,50 @@
-# Ancient Greek House Generator (Godot 4 prototype)
+# Ancient Greek City Block Generator (Godot 4 prototype)
 
-Generates Classical Greek courtyard houses of the **Olynthian pastas type** and
-shows the selected house as an interactive **3D cutaway**, a 2D plan, or a
-**coordinate schematic** for inspecting its geometry. Every footprint has 4, 5
-or 6 sides with no corner between 80° and 110°, and at least 2.0 m of
-continuous street frontage. Every house shown has passed the hard-rule
-validator (H00–H12). If a slot
-cannot produce a valid house within 10 candidates, it shows a generation error
-and never shows an invalid house.
+Draw the outline of a city block; the generator subdivides it into **5 or 6
+plots** and builds a Classical Greek courtyard house of the **Olynthian pastas
+type** on each one. All houses are shown together in one interactive **3D
+cutaway** of the block, and a **coordinate schematic** shows the block and the
+selected house with exact coordinates.
 
-![3D cutaway: two houses, and one house turned 45° left and right](docs/screenshot.png)
+Every house passes the house rules H00–H12 (4–6-sided footprint, no corner
+between 80° and 110°, its own 16 m² courtyard, a northern east–west wing, a
+pastas, its own entrance straight onto a street with ≥ 2.0 m of frontage) and
+the whole block passes the block rules B00–B07 (5 or 6 houses, all inside the
+block, no overlaps, no shared spaces or courtyards, every entrance on the block
+perimeter, one shared north). A block is shown only when **all** of that holds;
+otherwise the app reports why generation failed and shows no houses.
+
+![3D cutaway of a generated block of six houses](docs/screenshot.png)
 
 ## Using the app
 
-- On startup five different houses are generated, validated and stored; house 1 is shown in 3D.
-- **◀ / ▶** show the previous / next stored house and wrap (5 → 1, 1 → 5).
-  Navigation never generates anything: it selects a stored house, clears the
-  previous 3D model and builds the selected house's model from its data.
-- **↶ Rotate Left / Rotate Right ↷** orbit the camera 45° around the house
-  centre (animated over 0.2 s). Rotate Left turns the house counter-clockwise
-  on screen. Distance, elevation and focal point stay the same; the model is
-  never rebuilt by rotation.
-- **Regenerate All Houses** generates and validates five new houses (guaranteed
-  different from the previous set), replaces the stored set and returns to house 1.
-- **Show Coordinates** opens the coordinate schematic of the selected house;
-  **Back to 3D** returns to the 3D view. **2D Plan** shows the plan drawing.
-  Switching views never regenerates or changes the house and keeps it selected.
-- The info line shows VALID H00–H12, the number of exterior sides as computed
-  by the validator from the polygon, the shape, room count and size.
-- Both views fit the house to the available area without distortion and follow
-  window resizing; the button row wraps on narrow windows.
+1. **Draw the block.** The app starts with an empty drawing area (metre grid,
+   X east, Y south, north up) and a dashed guide of a block size that works
+   well. Click to place corners (snapped to 5 cm); click the first corner
+   again to close the outline. Right-click or Backspace removes the last
+   corner; a corner that would make the outline cross itself is refused. The
+   closed outline is checked: at least 3 corners, edges ≥ 1 m, not
+   self-intersecting, area ≥ 600 m².
+2. **Generate City Block** subdivides the outline into 6 plots (5 if 6 cannot
+   be fitted), builds and validates a house on every plot, validates the whole
+   block and shows it in 3D. The info line reads **VALID CITY BLOCK** only when
+   the block passed every check; on failure it reads **GENERATION FAILED** with
+   the most common reasons, and nothing is shown.
+3. **Click a house** (in 3D or in the block schematic) to select it: it gets an
+   orange outline and room labels; all other houses stay visible.
+4. **↶ Rotate Left / Rotate Right ↷** orbit the camera 45° around the centre of
+   the block. The model is never rebuilt by rotation or selection.
+5. **Show Coordinates** opens the coordinate schematic with two levels:
+   **Block Coordinates** (block vertices B0…, edge lengths and angles, every
+   house footprint with global coordinates, plot/party-wall lines, entrances on
+   the perimeter, unbuilt ground) and **Selected House** (rooms, walls, doors,
+   vertices in global and local coordinates). **Back to 3D** returns.
+6. **Regenerate Houses** builds a new block of houses in the same outline.
+   **Draw New Block** clears everything and starts a new outline.
+
+![Drawing the block outline](docs/drawing.png)
+
+![Block-level coordinate schematic](docs/schematic.png)
 
 ## Running
 
@@ -40,35 +55,107 @@ and never shows an invalid house.
   godot --headless --path . --script res://tests/smoke_test.gd </dev/null
   ```
 
-  It generates seeded 4/5/6-sided houses and re-validates them (side count and
-  corner angles recomputed from the polygon), runs negative validator checks,
-  compares the 3D meshes against the house data, checks that the schematic
-  shows the same geometry as the 3D meshes (vertices, shoelace areas,
-  courtyard 16 m², H11 angles, door segments) and that clicking a room selects
-  it, and checks rotation, view switching, navigation and regeneration. (Headless Godot 4.3 prints
+  City block: generates blocks on five fixed outlines (covering 5 and 6
+  houses) and re-checks every house and the block independently from the
+  geometry (sides, H11 angles, containment, overlaps, 16 m² courtyards,
+  entrances on the perimeter, frontage, wing north of the courtyard), runs the
+  validators, checks that an outline too small for 5 houses fails with a
+  reason, runs negative block checks (4 and 7 houses, overlap, house outside
+  the block, entrances off the perimeter, a communal courtyard, a courtyard
+  reaching into a neighbour, a rotated house), checks the 3D block model (every
+  house's floors and walls, picking by click, selection and rotation never
+  rebuild) and the block schematic, and drives the UI: drawing by clicks,
+  closing on the first corner, generating, selecting, rotating, switching views
+  without regenerating, regenerating in the same outline, and a failing outline.
+  It also keeps the single-house checks (standalone generator, house validator
+  negative checks, 3D meshes and schematic vs. data). Headless Godot 4.3 prints
   `Parameter "m" is null` when ArrayMeshes are freed; that is a dummy-renderer
-  quirk, not a test failure.)
+  quirk, not a test failure.
 
 ## Layout
 
 | File | Role |
 |---|---|
-| `scripts/house_generator.gd` | Builds candidates by construction, then calls the validator; bounded retries (max 10). |
+| `scripts/block_draw_view.gd` | Drawing canvas (`_draw()`): click corners, close on the first corner, then the block's footprints. |
+| `scripts/block_generator.gd` | `generate_block(polygon, seed)`: subdivides the block into plots, builds a house per plot, validates; tries 6 then 5 houses; bounded attempts. |
+| `scripts/block_validator.gd` | `validate_block(block) -> {valid, errors, residual_area}`: B00–B07 plus H00–H12 for every house. |
+| `scripts/house_generator.gd` | `build_in_plot(rng, footprint, block, kind)` builds a house filling a plot; the older standalone `generate_valid_house` (max 10 attempts) is kept for tests. |
 | `scripts/house_validator.gd` | `validate_house(house) -> {valid, errors, sides}`; explicit checks for H00–H12 and all prototype dimensions. |
-| `scripts/geometry.gd` | Shared measurements used by the validator and every view: shoelace area, edge lengths, interior angles, point-in-polygon, global→local, world→screen. |
-| `scripts/house_schematic_view.gd` | Coordinate schematic (`_draw()`) with grid, rulers, labels, picking and a scrollable inspection panel. |
-| `scripts/house_3d_view.gd` | `SubViewportContainer` with its own 3D world: meshes for the selected house only, camera orbit. |
-| `scripts/house_view.gd` | 2D plan (`_draw()`), also used for the generation-error panel. Reads data only. |
-| `scripts/main.gd` | UI: navigation, rotation, regeneration, 3D / plan / schematic views; stores the five results. |
+| `scripts/geometry.gd` | Shared measurements used by the validators and every view: shoelace area, edge lengths, interior angles, point-in-polygon, global→local, world→screen. |
+| `scripts/house_3d_view.gd` | `SubViewportContainer` with its own 3D world: one model of the whole block, selection overlay, camera orbit, picking. |
+| `scripts/house_schematic_view.gd` | Coordinate schematic (`_draw()`): block level and selected-house level, picking, scrollable inspection panel. |
+| `scripts/main.gd` | UI workflow: draw → generate → 3D / coordinates; selection, rotation, regeneration. |
 | `tests/smoke_test.gd` | Headless smoke test. |
 
-## Geometry model
+## City block generation
+
+Every edge of the drawn polygon is a public street. The block is one
+geometry model: `{polygon, houses, plots, seed, validation}`, and each house is
+the same house Dictionary as before, in the block's global coordinates (no
+house is rotated or translated afterwards, so all houses share one north).
+
+1. **Depth profile.** The street-to-street depth is sampled every 1.5 m
+   across the block.
+2. **Rows.** Either one row of "through" plots (block 13.5–20.5 m deep, streets
+   on both sides), or an east–west **row line** on the 5 cm grid splitting the
+   block into a **north row** (9.2–16 m deep) and a **south row** (11.6–18.5 m),
+   i.e. a block about 21–34 m deep. Houses are built only along the longest
+   stretch where every house fits; the block's pointed or too-deep ends outside
+   it stay **unbuilt corner ground** (reported in m², drawn grey).
+3. **Party walls.** Each row is cut into plots 12.5–22 m wide by straight party
+   walls tilted 22–42° from north–south (a vertical party wall would make 90°
+   corners, which H11 forbids); the outermost plots are closed by end walls
+   that cut off unusable block corners. Plots must have 4–6 sides, no corner in
+   [80°, 110°], no corner below 46°, edges ≥ 1.5 m, and be ≥ 11 m wide.
+   Neighbouring plots share the party-wall line exactly; north and south rows
+   share the row line.
+4. **Houses.** Each plot is filled by `build_in_plot`:
+   - **south row / one row**: party wall (or street) on the north, street on
+     the south: wing, pastas, courtyard band, then a street range with the
+     entrance passage onto the south street;
+   - **north row**: street on the north, party wall on the south: the entrance
+     passage runs through the wing from the north street to the pastas, and
+     the courtyard backs onto the row line.
+   The same layout rules as the standalone houses apply (16 m² courtyard,
+   pastas 1.5–2.5 m, 4–9 rooms, walls 0.50/0.25 m); spaces and walls are clipped
+   to the plot's interior polygon, never the courtyard, entrance passage or doors.
+   Up to 10 layouts are tried per plot.
+5. **Validation.** Every house is validated (H00–H12, with the street frontage
+   measured on the block boundary) and then the whole block (B00–B07). Up to 30
+   subdivisions are tried for 6 houses, then 30 for 5; if none passes, the
+   generator fails with a summary of the most common reasons.
+
+Generation is deterministic for a given outline and seed and usually takes
+0.05–1 s. On 40 random, roughly rectangular blocks of 70–105 × 24–34 m, about
+60 % produced a valid block (most with 6 houses); round, pointed, very small or
+deeper blocks (more than about 34 m north–south) usually fail with a clear
+reason. Blocks with long sides running east–west work best.
+
+## Block rules (enforced in `block_validator.gd`)
+
+| Rule | Checked numerically |
+|---|---|
+| B00 | The block polygon is simple with positive area. |
+| B01 | Exactly 5 or 6 houses. |
+| B02 | Every house footprint lies inside the block polygon (clipping, 0.01 m² tolerance). |
+| B03 | No two footprints overlap (shared party-wall lines are allowed). |
+| B04 | No shared spaces: the block defines no spaces, walls or openings of its own; no space of one house reaches into another. |
+| B05 | Every house has an entrance whose outer face lies on the block perimeter, on ≥ 2.0 m of continuous frontage, measured against this block's streets. |
+| B06 | Every courtyard is private: inside its own house, reaching into no other. |
+| B07 | One shared north: no house is rotated; with H02 every northern wing lies north of its courtyard. |
+
+Each house error is reported as `House N · H…`, so a block with one bad house
+is invalid as a whole.
+
+## House geometry model
 
 - Metres; X grows east, Y grows south, north is up. Everything inside the
   house is axis-aligned; only the exterior footprint has slanted sides.
 - **Footprint**: a polygon (`PackedVector2Array`). The exterior wall band is
   the footprint minus its 0.50 m inset (mitred); it is stored as one quad per
-  side, the south side split around the entrance gap.
+  side, the street side split around the entrance gap. In a block, a house's
+  exterior walls along a party-wall line meet the neighbour's: together they
+  form the party wall.
 - **Spaces** (rooms, courtyard, pastas, entrance passage) are clear interior
   rectangles. **Walls** are separate rectangles (exterior 0.50 m, interior
   0.25 m). **Door openings** are rectangles cut out of a wall line, so the wall
@@ -83,7 +170,11 @@ and never shows an invalid house.
 - Circulation is a graph: nodes are spaces plus the street; an edge exists only
   for an opening whose rectangle sits flush between the two spaces it joins.
 
-## Footprints (rules H00 and H11)
+## Standalone footprints (rules H00 and H11)
+
+In a block, the footprint is the plot (4–6 sides from the block outline and
+the tilted party walls). The standalone generator, kept for testing, makes its
+own footprints:
 
 The north face (the wing's back wall) and the south face (the street front
 with the entrance) stay horizontal. Because a corner between a horizontal and
@@ -109,7 +200,7 @@ room becomes concave.
 The orthogonal layout is sized so the outermost rooms (wing end rooms, side
 strips) keep at least 2.5 m clear of the slanted walls; then every space and
 interior wall is clipped to the interior polygon. Trimmed rooms must stay
-convex, keep ≥ 75 % of their bounding box, have no corner below 60° and be at
+convex, keep ≥ 60 % of their bounding box, have no corner below 45° and be at
 least 2.0 m wide in every direction (rotating-calipers width).
 
 H00 is checked on the polygon itself: at least 3 vertices, no zero-length
@@ -118,7 +209,7 @@ positive area, no intersections between non-adjacent edges, and 4–6 sides.
 H11 recomputes every interior angle (reflex angles included) and rejects any
 in [80°, 110°], inclusive.
 
-## Generation (construction by constraints)
+## Standalone house generation (construction by constraints)
 
 1. Choose 4, 5 or 6 sides (seeded) and a courtyard of exactly 16 m² (4×4, 3.2×5 or 5×3.2 m).
 2. Pick depths for the northern wing (3.0–4.5 m) and pastas (1.5–2.5 m).
@@ -138,7 +229,6 @@ in [80°, 110°], inclusive.
 8. Clip spaces and walls to the interior polygon; build the mitred exterior band.
 9. Validate. Only a house with zero errors is returned.
 
-Generating and validating five houses and building one 3D model takes about 20 ms.
 
 ## Hard rules (enforced in `house_validator.gd`)
 
@@ -151,23 +241,23 @@ polygon clipping against the actual footprint.
 |---|---|
 | H00 | Footprint polygon: simple, closed, positive area, no zero-length or collinear edges, 4–6 sides. |
 | H01 | Exactly one courtyard, an unclipped rectangle; `w*d = 16.0 ± 0.001 m²`; inside the footprint; nothing overlaps it. |
-| H02 | Wing = bounding box of the rooms north of the pastas: `width > depth`, `bottom <= pastas.top`, north of the courtyard, rooms inside the footprint; at least one wing room opens to the pastas. |
+| H02 | Wing = bounding box of the rooms (and a wing entrance passage) north of the pastas: `width > depth`, `bottom <= pastas.top`, north of the courtyard, rooms inside the footprint; at least one wing room opens to the pastas. |
 | H03 | `courtyard.center_y >` footprint bounding-box `center_y`; courtyard's north edge flush with the pastas. |
 | H04 | One pastas, depth 1.5–2.5 m, E–W axis, directly north of the courtyard, verified open edge to the courtyard with no wall across it, door to a north room; if trimmed, still convex without spiky corners. |
 | H05 | Positive sizes; everything inside the footprint polygon; spaces inside the exterior wall band; no pairwise overlaps; area of spaces+walls+gaps = footprint area. |
-| H06 | Interior walls 0.25 m; exterior walls lie in, and exactly fill, the 0.50 m band; rooms ≥ 2.0 m wide, ≥ 5.0 m², clear span ≤ 5.0 m; doors ≥ 0.80 m; every door is a gap flanked by the same wall line; trimmed rooms convex, corners ≥ 60°, ≥ 75 % of their box. |
+| H06 | Interior walls 0.25 m; exterior walls lie in, and exactly fill, the 0.50 m band; rooms ≥ 2.0 m wide, ≥ 5.0 m², clear span ≤ 5.0 m; doors ≥ 0.80 m; every door is a gap flanked by the same wall line; trimmed rooms convex, corners ≥ 45°, ≥ 60 % of their box. |
 | H07 | Every opening verified geometrically; BFS from the street reaches every space. |
-| H08 | Valid entrance whose outer face lies on a south edge of the footprint polygon, into a passage that opens to the courtyard (or into the courtyard); not blocked; courtyard reachable. |
+| H08 | Valid entrance whose outer face lies on an edge of the footprint polygon facing the house's street side (south, or north for north-row houses), into a passage that leads via the pastas or directly to the courtyard; not blocked; courtyard reachable. |
 | H09 | 4–9 rooms; known function; every room opens directly onto pastas, courtyard or passage. |
 | H10 | North-wing rooms span the full wing depth (aligned E–W divisions) and the wing (within the interior) = rooms + N–S partitions; every interior wall end meets another wall, a door gap or the exterior wall band, or ends as an anta on the pastas line; all interior walls connect to the exterior band. |
 | H11 | No interior angle of the footprint in [80°, 110°]. |
-| H12 | A verified entrance opens directly onto the street frontage: the longest footprint edge on the street line (south). |
+| H12 | A verified entrance opens directly onto the street frontage: a footprint edge on a street (in a block, an edge lying on the block boundary). |
 | H12.1 | That frontage is one continuous edge at least 2.0 m long. |
 
 ## 3D view
 
-`house_3d_view.gd` turns the validated house Dictionary into meshes; it refuses
-any house without a passing validation result.
+`house_3d_view.gd` turns the validated block (every house Dictionary in it)
+into one model; it refuses any block or house without a passing validation result.
 
 - **Floors**: one flat mesh per space (rectangle or exact clipped polygon,
   triangulated), coloured by room function; courtyard in light earth/stone;
@@ -177,16 +267,24 @@ any house without a passing validation result.
   pieces, an extruded prism for mitred exterior quads and trimmed interior
   walls. Door gaps stay open because walls exist only where the data has
   wall pieces; nothing is added (no roofs, no extra walls).
-- **Markers**: north arrow and "N" north of the house, entrance arrow on the
-  street, billboard room labels sized to their rooms.
-- **Camera**: perspective, 55° elevation, framed so the whole house fits at any
-  rotation; plan (x, y) maps to 3D (x, 0, y), north is −Z.
-- Only the selected house's meshes exist; materials are shared; no physics.
+- **Block**: the block polygon as a slightly darker ground slab (unbuilt corner
+  ground shows through), the streets around it as ground, a "House N" label
+  per house.
+- **Markers**: north arrow and "N" north of the block, entrance arrow on the
+  street, billboard room labels for the selected house.
+- **Selection**: an orange outline on the selected house's walls and its room
+  labels live in a separate overlay; selecting rebuilds only the overlay.
+  Clicking the 3D view casts a ray onto the ground and selects the house
+  whose footprint contains the hit point.
+- **Camera**: perspective, 55° elevation, orbiting the block centre, framed so
+  the whole block fits at any rotation; plan (x, y) maps to 3D (x, 0, y),
+  north is −Z.
+- Only the current block's meshes exist; materials are shared; no physics.
 
 The 0.8 m wall height is a cutaway height for visibility, **not** a claim about
 ancient wall heights, and the pastas is shown without its roof.
 
-The smoke test reads the vertices back from the generated meshes and checks
+For single houses the smoke test reads the vertices back from the generated meshes and checks
 that each floor matches its space's area and extent (courtyard exactly
 16 m²), that there is exactly one wall mesh per validated wall with the same
 footprint and 0.8 m height, that every footprint corner is a corner of the
@@ -195,9 +293,14 @@ floors + gaps + walls cover exactly the footprint area.
 
 ## Coordinate schematic
 
-![Coordinate schematic with a selected room](docs/schematic.png)
+**Block Coordinates** draws the block polygon with vertices `B0, B1, …` (global
+coordinates, angles, edge lengths), every house footprint `H1…` with its area
+and courtyard, party walls (purple), entrances on the perimeter (red) and the
+unbuilt corner ground (grey); the panel lists the block, every house (footprint
+vertices and angles, frontage, entrance segment) and every party wall. Clicking
+a house selects it.
 
-**Show Coordinates** draws a technical plan of the selected house:
+**Selected House** draws a technical plan of the selected house:
 
 - X/Y rulers and a metre grid (major lines every 5 m), axis labels, scale bar, north arrow.
 - The exterior footprint with every vertex labelled `P0, P1, …` and its
@@ -220,12 +323,10 @@ floors + gaps + walls cover exactly the footprint area.
 - Numbers are shown to two decimals; the data keeps full precision.
 
 There is one geometry model: the house Dictionary produced by the generator.
-The validator, the 3D view, the 2D plan and the schematic all read it, and all
+The validators, the drawing canvas, the 3D view and the schematic all read it, and all
 measurements come from `geometry.gd`. **Global** coordinates are the data's
 own (X east, Y south, metres). **Local** coordinates are the same points
-translated so the footprint's bounding-box top-left corner is (0, 0); the
-generator already places that corner at the origin, so the two coincide for
-these single houses. The schematic is built once per house and only redrawn
+translated so the house footprint's bounding-box top-left corner is (0, 0). The schematic is built once per house and only redrawn
 when the selection or window size changes; no nodes are created per vertex or
 wall.
 
@@ -242,13 +343,16 @@ room (*oikos*) in the northern range. See the
 [Olynthos Project](https://sites.lsa.umich.edu/olynthos-project/olynthian-houses/)
 and [House A vii 4](https://perseus-aa.github.io/items/aa_398.html). Olynthian
 houses were typically much larger (around 17 × 17 m) with larger courtyards than
-this prototype produces.
+this prototype produces. Olynthian blocks on the North Hill were long
+rectangles (about 86 × 35 m) split by a narrow east–west alley into two rows of
+five houses; this prototype's blocks have no alley (the brief forbids shared
+passages), so the row line is a party wall.
 
 **Project-specific mandatory constraints.** The 16 m² courtyard, the pastas
 depth range, the 4–9 room count, the 4–6-sided footprints without corners
-between 80° and 110°, the 2.0 m street frontage, a south street and the
-H00–H12 rules are requirements of
-this project, not ancient standards. Olynthian houses within a block were
+between 80° and 110°, the 2.0 m street frontage, 5 or 6 houses per block with
+every block edge a street, and the H00–H12 and B00–B07 rules are requirements
+of this project, not ancient standards. Olynthian houses within a block were
 mostly near-rectangular; the slanted and waisted footprints are project
 variations (irregular plots did occur in Greek towns, but these shapes are not
 modelled on particular houses).
@@ -256,7 +360,9 @@ modelled on particular houses).
 **Simplified engineering assumptions.** Wall thicknesses (0.50/0.25 m), minimum
 room width/area, 5 m maximum clear span, 0.80 m minimum door, axis-aligned
 rectangles inside the house, the side tilts, the anti-sliver limits for trimmed
-rooms (60° corners, 75 % fill), the 5 cm construction grid, the wall-alignment
+rooms (45° corners, 60 % fill), the subdivision parameters (row depths,
+plot widths 12.5–22 m, party-wall tilt 22–42°), leaving block corners unbuilt,
+the 5 cm construction grid, the wall-alignment
 test standing in for structural analysis, and the 0.8 m cutaway wall height in
 3D. Room functions are illustrative labels.
 

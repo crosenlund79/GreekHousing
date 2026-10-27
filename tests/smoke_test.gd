@@ -1,33 +1,54 @@
 extends SceneTree
 ## Headless smoke test:
 ##   godot --headless --path . --script res://tests/smoke_test.gd </dev/null
-## - generates seeded 4-, 5- and 6-sided houses and re-validates each one
-##   independently (H00–H12), recomputing side count and corner angles from
-##   the polygon;
-## - negative checks proving the validator rejects broken houses;
-## - 3D checks: meshes read back from the 3D view match the validated data
-##   (exterior polygon, courtyard, walls, open doors), rotation moves only the
-##   camera;
-## - coordinate schematic: same geometry as the 3D meshes, vertex coordinates,
-##   shoelace areas, courtyard 16 m², H11 angles, room picking, and switching
-##   views without regenerating;
-## - UI checks: navigation shows stored houses without regenerating and builds
-##   only the selected house's 3D model; regeneration replaces all five.
+## City block:
+## - generates blocks on fixed outlines (5 or 6 houses each) and re-checks
+##   them independently: every house H00–H12, inside the block, no overlaps,
+##   its own 16 m² courtyard, an entrance straight onto the block perimeter on
+##   >= 2.0 m frontage, no rotation; plus the block validator (B00–B07);
+## - an outline that cannot hold 5 houses fails with a reason (no block shown);
+## - negative block checks: 4 or 7 houses, overlap, house outside the block,
+##   entrance off the perimeter, shared spaces, shared courtyard, rotation;
+## - 3D: one model with every house's floors and walls built from the data;
+##   selecting and rotating never rebuild it; picking finds the clicked house;
+## - coordinate schematic at block and house level;
+## - UI workflow: draw by clicking, close on the first corner, generate, select,
+##   rotate, switch views without regenerating, regenerate in the same outline.
+## Single houses (standalone generator, kept for the validator):
+## - seeded 4-, 5- and 6-sided houses re-validated (H00–H12) from geometry;
+## - negative checks proving the house validator rejects broken houses;
+## - 3D meshes and the schematic reproduce the validated data exactly.
 ## Exits with status 1 on any failure.
 
 const Generator := preload("res://scripts/house_generator.gd")
 const Validator := preload("res://scripts/house_validator.gd")
+const BG := preload("res://scripts/block_generator.gd")
+const BV := preload("res://scripts/block_validator.gd")
 const House3DView := preload("res://scripts/house_3d_view.gd")
 const SchematicView := preload("res://scripts/house_schematic_view.gd")
 const G := preload("res://scripts/geometry.gd")
 const PER_SIDE_COUNT := 8
+## Fixed block outlines (metres, X east, Y south) with seeds known to succeed.
+const BLOCKS := [
+	["wide hexagon", [Vector2(5, 8), Vector2(30, 4), Vector2(62, 6), Vector2(70, 18), Vector2(62, 32), Vector2(28, 34), Vector2(3, 27)], 1],
+	["quadrilateral", [Vector2(4, 6), Vector2(66, 2), Vector2(70, 30), Vector2(8, 34)], 2],
+	["quadrilateral (5 houses)", [Vector2(4, 6), Vector2(66, 2), Vector2(70, 30), Vector2(8, 34)], 6],
+	["long shallow", [Vector2(2, 5), Vector2(98, 3), Vector2(96, 20), Vector2(4, 22)], 1],
+	["irregular heptagon", [Vector2(18, 26), Vector2(50, 21), Vector2(96, 23), Vector2(120, 33), Vector2(112, 50), Vector2(62, 54), Vector2(22, 49)], 11],
+]
+## Too small for 5 houses: generation must fail with a reason.
+const SMALL_BLOCK := [Vector2(10, 4), Vector2(55, 2), Vector2(72, 20), Vector2(50, 36), Vector2(6, 30)]
 
 var failures := 0
 var main: Node
 var samples := {}
+var blocks: Array = []
 
 
 func _initialize() -> void:
+	blocks = _block_generation_checks()
+	if not blocks.is_empty():
+		_block_negative_checks(blocks[0])
 	samples = _generation_checks()
 	if samples.size() == 3:
 		_negative_checks(samples[4])
@@ -44,16 +65,281 @@ var _frames := 0
 func _process(_delta: float) -> bool:
 	_frames += 1
 	if _frames == 1:
+		for b in blocks:
+			_block_3d_checks(b)
+			_block_schematic_checks(b)
 		for sides in samples:
 			_3d_checks(samples[sides], sides)
-		_schematic_switch_checks()
-		_navigation_checks()
+		_ui_checks()
 		main.queue_free()   # release meshes before the engine shuts down
 		return false
 	print("SMOKE TEST %s" % ("PASSED" if failures == 0 else "FAILED (%d)" % failures))
 	quit(1 if failures > 0 else 0)
 	return true
 
+
+# --------------------------------------------------------------------------
+# City block generation, independently re-checked
+# --------------------------------------------------------------------------
+
+func _block_generation_checks() -> Array:
+	var found: Array = []
+	for spec in BLOCKS:
+		var poly := PackedVector2Array(spec[1])
+		var t0 := Time.get_ticks_usec()
+		var res := BG.generate_block(poly, spec[2])
+		var ms := (Time.get_ticks_usec() - t0) / 1000.0
+		var tag := "block '%s'" % spec[0]
+		if not res["ok"]:
+			_fail("%s (seed %d): generation failed: %s" % [tag, spec[2], res["reason"]])
+			continue
+		var b: Dictionary = res["block"]
+		var before := failures
+		_check_block_geometry(b, tag)
+		if failures == before:
+			print("%s: VALID, %d houses in %.0f ms (%d layouts), unbuilt corner ground %.1f m²" % [tag, b["houses"].size(), ms,
+				res["attempts"], b["validation"]["residual_area"]])
+			found.append(b)
+	if not found.any(func(b): return b["houses"].size() == 5) or not found.any(func(b): return b["houses"].size() == 6):
+		_fail("the fixed outlines should cover blocks of both 5 and 6 houses")
+	if found.size() != BLOCKS.size():
+		_fail("only %d of %d fixed block outlines produced a valid block" % [found.size(), BLOCKS.size()])
+	var small := BG.generate_block(PackedVector2Array(SMALL_BLOCK), 1)
+	if small["ok"] or not small["block"].is_empty() or small["reason"] == "":
+		_fail("a block too small for 5 houses must fail with a reason and no block")
+	else:
+		print("small block check OK: refused — %s" % small["reason"].left(120))
+	var bowtie := PackedVector2Array([Vector2(0, 0), Vector2(60, 30), Vector2(60, 0), Vector2(0, 30)])
+	if BG.check_block_polygon(bowtie) == "" or BG.generate_block(bowtie, 1)["ok"]:
+		_fail("a self-intersecting block outline must be refused")
+	return found
+
+
+## Everything the brief demands, measured directly on the geometry (not on
+## the validator's say-so), then the validators themselves.
+func _check_block_geometry(b: Dictionary, tag: String) -> void:
+	var poly: PackedVector2Array = b["polygon"]
+	var houses: Array = b["houses"]
+	if houses.size() < 5 or houses.size() > 6:
+		_fail("%s: %d houses (required 5 or 6)" % [tag, houses.size()])
+	var v := BV.validate_block(b)
+	if not v["valid"] or not b["validation"]["valid"]:
+		_fail("%s: block returned as valid but violates: %s" % [tag, v["errors"]])
+	for i in houses.size():
+		var h: Dictionary = houses[i]
+		var ht := "%s house %d" % [tag, i + 1]
+		var fp: PackedVector2Array = h["footprint"]
+		var hv := Validator.validate_house(h)
+		if not hv["valid"]:
+			_fail("%s violates %s" % [ht, hv["errors"]])
+		var sides := Validator.count_sides(fp)
+		if sides < 4 or sides > 6 or fp.size() != sides:
+			_fail("%s: footprint has %d sides" % [ht, sides])
+		var bad := Validator.interior_angles(fp).filter(func(a): return a >= 80.0 and a <= 110.0)
+		if not bad.is_empty():
+			_fail("%s: corner angles %s in 80°–110°" % [ht, bad])
+		if Validator._outside_area(fp, poly) > 1e-4:
+			_fail("%s extends outside the block" % ht)
+		if h.get("rotation", 0.0) != 0.0:
+			_fail("%s is rotated" % ht)
+		for j in range(i + 1, houses.size()):
+			if Validator._overlap_area(fp, houses[j]["footprint"]) > 1e-4:
+				_fail("%s overlaps house %d" % [ht, j + 1])
+		var courts: Array = h["spaces"].filter(func(s): return s["kind"] == "courtyard")
+		if courts.size() != 1 or absf(G.item_area(courts[0]) - 16.0) > 1e-3:
+			_fail("%s: needs exactly one 16 m² courtyard" % ht)
+		elif Validator._outside_area(G.shape(courts[0]), fp) > 1e-4:
+			_fail("%s: courtyard outside its own house" % ht)
+		# Entrance outer face straight on a block edge (a street), on >= 2.0 m frontage.
+		var ctx := {"footprint": fp, "by_id": {}}
+		for sp in h["spaces"]:
+			ctx["by_id"][sp["id"]] = sp
+		var on_street := false
+		for op in h["openings"]:
+			if op["kind"] == "entrance":
+				var face := Validator._street_face(op, ctx)
+				on_street = on_street or (not face.is_empty() and Validator._segment_on_boundary(face[0], face[1], poly))
+		if not on_street:
+			_fail("%s: no entrance on the block perimeter" % ht)
+		if Validator.street_frontage(h)["length"] < 2.0:
+			_fail("%s: street frontage under 2.0 m" % ht)
+		# Northern wing north of the courtyard in the one shared frame.
+		var court_top: float = G.bbox(G.shape(courts[0])).position.y if courts.size() == 1 else 0.0
+		var wing: Array = h["spaces"].filter(func(s): return s["kind"] == "room" and s.get("zone", "") == "north")
+		if wing.is_empty() or wing.any(func(s): return (s["rect"] as Rect2).end.y > court_top + 1e-4):
+			_fail("%s: northern wing not north of its courtyard" % ht)
+	for key in ["spaces", "walls", "openings", "shared_spaces"]:
+		if b.has(key):
+			_fail("%s: the block defines shared %s" % [tag, key])
+
+
+# --------------------------------------------------------------------------
+# Block validator negative checks
+# --------------------------------------------------------------------------
+
+func _block_negative_checks(base: Dictionary) -> void:
+	var b := _copy_block(base)
+	b["houses"] = b["houses"].slice(0, 4)
+	_expect_block_rejected(b, "B01", "a block of 4 houses", "4 houses")
+
+	b = _copy_block(base)
+	b["houses"].append(b["houses"][0].duplicate(true))
+	_expect_block_rejected(b, "B03", "two houses on the same plot", "overlap")
+
+	b = _copy_block(base)
+	_translate_house(b["houses"][0], Vector2(0.0, -300.0))
+	_expect_block_rejected(b, "B02", "a house outside the block", "outside the block")
+
+	# Streets moved away: the block outline is enlarged, entrances no longer on it.
+	b = _copy_block(base)
+	var c := G.centroid(b["polygon"])
+	var big := PackedVector2Array(Array(b["polygon"]).map(func(p): return c + (p - c) * 1.25))
+	b["polygon"] = big
+	for h in b["houses"]:
+		h["block"] = big
+	_expect_block_rejected(b, "B05", "entrances not on the block perimeter", "no entrance on the block perimeter")
+
+	b = _copy_block(base)
+	b["shared_spaces"] = [{"kind": "courtyard", "rect": Rect2(30, 15, 4, 4)}]
+	_expect_block_rejected(b, "B04", "a communal courtyard", "shared space")
+
+	# House 1's courtyard placed inside house 2.
+	b = _copy_block(base)
+	var court2: Dictionary = _courtyard(b["houses"][1])
+	var court1: Dictionary = _courtyard(b["houses"][0])
+	court1["rect"] = court2["rect"]
+	if court2.has("poly"):
+		court1["poly"] = court2["poly"]
+	_expect_block_rejected(b, "B06", "a courtyard reaching into a neighbour", "courtyard reaches into House 2")
+
+	b = _copy_block(base)
+	b["houses"][2]["rotation"] = 90.0
+	_expect_block_rejected(b, "B07", "a rotated house", "rotated")
+
+
+func _copy_block(b: Dictionary) -> Dictionary:
+	var out := b.duplicate(true)
+	out.erase("validation")
+	return out
+
+
+## Moves every piece of a house's geometry (a stand-in for a misplaced plot).
+func _translate_house(h: Dictionary, d: Vector2) -> void:
+	h["footprint"] = Transform2D(0.0, d) * (h["footprint"] as PackedVector2Array)
+	for key in ["spaces", "walls", "openings"]:
+		for item in h[key]:
+			item["rect"] = Rect2((item["rect"] as Rect2).position + d, (item["rect"] as Rect2).size)
+			if item.has("poly"):
+				item["poly"] = Transform2D(0.0, d) * (item["poly"] as PackedVector2Array)
+
+
+func _expect_block_rejected(b: Dictionary, code: String, what: String, phrase: String) -> void:
+	var check := BV.validate_block(b)
+	var hits: Array = check["errors"].filter(func(e): return e.begins_with(code + ":") and e.contains(phrase))
+	if check["valid"] or hits.is_empty():
+		_fail("block validator did not reject %s with %s (got %s)" % [what, code, check["errors"].slice(0, 4)])
+	else:
+		print("block negative check OK: %s -> %s" % [what, hits[0]])
+	var shown: SubViewportContainer = House3DView.new()
+	b["validation"] = check
+	if shown.show_block(b) or shown.model.get_child_count() != 0:
+		_fail("3D view displayed an invalid block (%s)" % what)
+	shown.free()
+
+
+# --------------------------------------------------------------------------
+# 3D city view: one model, all houses, built from the data
+# --------------------------------------------------------------------------
+
+func _block_3d_checks(b: Dictionary) -> void:
+	var view: SubViewportContainer = House3DView.new()
+	view.size = Vector2(1000, 700)
+	root.add_child(view)
+	var houses: Array = b["houses"]
+	var tag := "3D block (%d houses)" % houses.size()
+	if not view.show_block(b, 0):
+		_fail("%s: validated block refused" % tag)
+		view.free()
+		return
+	var floors := {}
+	var walls := {}
+	for mi in view.model.get_children():
+		var hi: int = mi.get_meta("house")
+		match mi.get_meta("role"):
+			"floor": floors[hi] = floors.get(hi, 0) + 1
+			"wall": walls[hi] = walls.get(hi, 0) + 1
+	for i in houses.size():
+		if floors.get(i, 0) != houses[i]["spaces"].size() or walls.get(i, 0) != houses[i]["walls"].size():
+			_fail("%s: house %d has %d floors / %d walls for %d spaces / %d walls" % [tag, i + 1, floors.get(i, 0),
+				walls.get(i, 0), houses[i]["spaces"].size(), houses[i]["walls"].size()])
+	if floors.size() != houses.size():
+		_fail("%s: floors for %d houses, expected all %d in one model" % [tag, floors.size(), houses.size()])
+	# Selecting (by click on a courtyard) and rotating never rebuild the model.
+	var before := _model_state(view)
+	var builds: int = view.build_count
+	for i in houses.size():
+		var c := G.centroid(G.shape(_courtyard(houses[i])))
+		var picked: int = view.pick_house(view.camera.unproject_position(Vector3(c.x, 0.0, c.y)))
+		if picked != i:
+			_fail("%s: clicking house %d's courtyard picked %d" % [tag, i + 1, picked])
+		view.set_selected(i)
+		if view.selected != i or view.overlay.get_children().filter(func(n): return n.get_meta("role") == "highlight").is_empty():
+			_fail("%s: selecting house %d shows no highlight" % [tag, i + 1])
+	var cam0: Vector3 = view.camera.position
+	var dist0 := cam0.distance_to(view.center)
+	for steps in [1, -2, 1]:
+		view.rotate_view(steps, false)
+		var cam: Vector3 = view.camera.position
+		var looks_at_center: float = (-view.camera.transform.basis.z).dot((view.center - cam).normalized())
+		if absf(cam.distance_to(view.center) - dist0) > 1e-3 or looks_at_center < 0.9999:
+			_fail("%s: rotation changed the camera distance or focal point" % tag)
+	if view.camera.position.distance_to(cam0) > 1e-3:
+		_fail("%s: rotating +45°, -90°, +45° did not return the camera" % tag)
+	if _model_state(view) != before or view.build_count != builds:
+		_fail("%s: selection or rotation changed or rebuilt the model" % tag)
+	var bb := G.bbox(b["polygon"])
+	if view.center.distance_to(Vector3(bb.get_center().x, 0.0, bb.get_center().y)) > 1e-3:
+		_fail("%s: camera does not orbit the block centre" % tag)
+	if failures == 0:
+		print("%s check OK: every house's floors and walls in one model; picking, selection and rotation keep it" % tag)
+	view.queue_free()
+
+
+func _block_schematic_checks(b: Dictionary) -> void:
+	var view: Control = SchematicView.new()
+	view.size = Vector2(1200, 800)
+	root.add_child(view)
+	var tag := "block schematic"
+	if not view.show_block(b, 0):
+		_fail("%s: validated block refused" % tag)
+		view.queue_free()
+		return
+	var text: String = view.inspection_text()
+	var poly: PackedVector2Array = b["polygon"]
+	for i in poly.size():
+		if not text.contains("B%d: (%.2f, %.2f)" % [i, poly[i].x, poly[i].y]):
+			_fail("%s: block vertex B%d not listed with global coordinates" % [tag, i])
+	var bm: Dictionary = view._bm
+	if bm["houses"].size() != b["houses"].size() or bm["party"].is_empty():
+		_fail("%s: houses or party walls missing" % tag)
+	for h in bm["houses"]:
+		if h["entrances"].is_empty() or absf(h["court_area"] - 16.0) > 1e-3:
+			_fail("%s: house %d shows no entrance or a wrong courtyard" % [tag, h["index"] + 1])
+	var clicked := []
+	view.house_clicked.connect(func(i): clicked.append(i))
+	var last: int = b["houses"].size() - 1
+	var c := G.centroid(G.shape(_courtyard(b["houses"][last])))
+	var sel: Dictionary = view.select_at(view.world_to_screen(c))
+	if sel.get("index", -1) != last or clicked != [last]:
+		_fail("%s: clicking house %d selected %s" % [tag, last + 1, sel])
+	if failures == 0:
+		print("%s check OK: %d block vertices, %d houses, %d party walls; clicking selects a house" % [tag, poly.size(), bm["houses"].size(), bm["party"].size()])
+	view.queue_free()
+
+
+# --------------------------------------------------------------------------
+# Single houses (standalone generator)
+# --------------------------------------------------------------------------
 
 func _generation_checks() -> Dictionary:
 	var t0 := Time.get_ticks_usec()
@@ -202,7 +488,7 @@ func _3d_checks(house: Dictionary, sides: int) -> void:
 
 
 # --------------------------------------------------------------------------
-# Coordinate schematic
+# Coordinate schematic (single house)
 # --------------------------------------------------------------------------
 
 ## The schematic must show exactly the geometry the 3D meshes were built from.
@@ -274,29 +560,6 @@ func _schematic_checks(house: Dictionary, sides: int, floors: Dictionary, ext_po
 	view.queue_free()
 
 
-## Opening the schematic of the selected house and returning to 3D must not
-## regenerate, rebuild or change the selection.
-func _schematic_switch_checks() -> void:
-	main.show_next()
-	var idx: int = main.index
-	var gen: int = main.generation
-	var builds: int = main.view3d.build_count
-	var house: Dictionary = main.houses[idx]["house"]
-	main.show_coordinates()
-	if main.mode != "schematic" or not main.schematic.visible or main.view3d.visible or not is_same(main.schematic.house, house):
-		_fail("Show Coordinates should show the schematic of the selected house")
-	main.back_to_3d()
-	main.show_coordinates()
-	main.back_to_3d()
-	if not main.view3d.visible or main.schematic.visible or main.index != idx or not is_same(main.view3d.house, house):
-		_fail("Back to 3D should return to the same selected house")
-	if main.generation != gen or main.view3d.build_count != builds or not is_same(main.houses[idx]["house"], house):
-		_fail("switching between 3D and the schematic regenerated or rebuilt the house")
-	main.show_previous()
-	if failures == 0:
-		print("schematic switch check OK: same house, no regeneration, no 3D rebuild")
-
-
 func _model_state(view: SubViewportContainer) -> Array:
 	return view.model.get_children().map(func(n): return [n.get_instance_id(), n.transform])
 
@@ -306,62 +569,72 @@ func _bbox(points: PackedVector2Array) -> Rect2:
 
 
 # --------------------------------------------------------------------------
-# UI: navigation and regeneration
+# UI workflow: draw, close, generate, select, rotate, views, regenerate
 # --------------------------------------------------------------------------
 
-func _navigation_checks() -> void:
-	var gen0: int = main.generation
-	var stored: Array = main.houses.duplicate()   # same result objects
+func _ui_checks() -> void:
+	var dv: Control = main.draw_view
+	if main.mode != "draw" or not dv.visible or main.view3d.visible or not main.block.is_empty() or not dv.points.is_empty():
+		_fail("startup must show an empty drawing area and no houses")
+	if not main.buttons["generate"].disabled:
+		_fail("Generate City Block must be disabled before a block is drawn")
+	if dv.size.x < 100.0 or dv.size.y < 100.0:
+		_fail("drawing area has no size (%s)" % dv.size)
+		return
+	var pts: Array = BLOCKS[4][1]
+	for p in pts:
+		dv.click(dv.world_to_screen(p))
+	# A corner that would make the outline cross itself is refused.
+	dv.click(dv.world_to_screen(Vector2(60, 10)))
+	if dv.points.size() != pts.size() or dv.closed:
+		_fail("drawing: expected %d corners and an open outline, got %d (closed %s)" % [pts.size(), dv.points.size(), dv.closed])
+	dv.click(dv.world_to_screen(pts[0]) + Vector2(3, -2))   # near the first corner closes it
+	if not dv.closed or main.polygon != PackedVector2Array(pts) or main.buttons["generate"].disabled:
+		_fail("clicking the first corner must close the block and enable Generate City Block")
+	if not main.generate(BLOCKS[4][2]):
+		_fail("Generate City Block failed on the drawn outline: %s" % main.last_reason)
+		return
+	var b: Dictionary = main.block
+	var gen: int = main.generation
 	var view3d: SubViewportContainer = main.view3d
-	if stored.size() != 5 or main.index != 0 or not is_same(main.plan_view.result, stored[0]):
-		_fail("startup must store five houses and display house 1")
-	for r in stored:
-		if not r["ok"] or not Validator.validate_house(r["house"])["valid"]:
-			_fail("startup stored a house that is not valid")
-	if stored[0]["ok"] and not is_same(view3d.house, stored[0]["house"]):
-		_fail("startup must build the 3D model of house 1")
-	var steps := [["next", 1], ["next", 2], ["prev", 1], ["prev", 0], ["prev", 4], ["next", 0]]
-	for step in steps:
-		var builds: int = view3d.build_count
-		if step[0] == "next":
-			main.show_next()
-		else:
-			main.show_previous()
-		var same_data: bool = main.generation == gen0 and main.houses.size() == 5
-		for i in 5:
-			same_data = same_data and is_same(main.houses[i], stored[i])
-		var r: Dictionary = stored[step[1]]
-		var wall_meshes: int = view3d.model.get_children().filter(func(n): return n.get_meta("role") == "wall").size()
-		if main.index != step[1] or not is_same(main.plan_view.result, r) or not same_data:
-			_fail("navigation %s should show stored house %d without regenerating" % [step[0], step[1] + 1])
-		elif r["ok"] and (not is_same(view3d.house, r["house"]) or view3d.build_count != builds + 1 or wall_meshes != r["house"]["walls"].size()):
-			_fail("navigation %s should rebuild the 3D model once, for house %d only" % [step[0], step[1] + 1])
-	if main.counter.text != "House 1 / 5":
-		_fail("counter label should read 'House 1 / 5', got '%s'" % main.counter.text)
-	var builds_before_rotation: int = view3d.build_count
+	if main.mode != "3d" or not view3d.visible or dv.visible or not is_same(view3d.block, b) or not b["validation"]["valid"]:
+		_fail("after generating, the 3D view must show the validated block")
+	if b["houses"].size() < 5 or b["houses"].size() > 6 or not main.info.text.begins_with("VALID CITY BLOCK"):
+		_fail("the city view must report a valid block of 5 or 6 houses (info: %s)" % main.info.text)
+	var builds: int = view3d.build_count
+	var state := _model_state(view3d)
+	main.select_house(2)
 	main.rotate_left()
 	main.rotate_right()
 	main.rotate_right()
-	if view3d.build_count != builds_before_rotation or main.generation != gen0 or not is_same(view3d.house, stored[0]["house"]):
-		_fail("rotation buttons must not regenerate or rebuild")
-	main.toggle_plan()
-	if view3d.visible or not main.plan_view.visible or not is_same(main.plan_view.result, stored[0]):
-		_fail("2D plan toggle should show the same stored house")
-	main.toggle_plan()
-	main.show_next()
-	main.regenerate_all()
-	if main.generation != gen0 + 1 or main.index != 0 or not is_same(main.plan_view.result, main.houses[0]):
-		_fail("regeneration must store a new set and return to house 1")
-	if main.houses[0]["ok"] and not is_same(view3d.house, main.houses[0]["house"]):
-		_fail("regeneration must build the 3D model of the new house 1")
-	for i in 5:
-		var r: Dictionary = main.houses[i]
-		if is_same(r, stored[i]) or (r["ok"] and stored[i]["ok"] and main._signature(r["house"]) == main._signature(stored[i]["house"])):
-			_fail("regeneration did not replace house %d" % (i + 1))
-		if not r["ok"] or not Validator.validate_house(r["house"])["valid"]:
-			_fail("regenerated house %d is not valid" % (i + 1))
+	if main.selected != 2 or view3d.selected != 2 or view3d.build_count != builds or _model_state(view3d) != state \
+			or main.generation != gen or not is_same(main.block, b):
+		_fail("selecting and rotating must keep the block and the 3D model")
+	main.show_coordinates()
+	if main.mode != "schematic" or not main.schematic.visible or view3d.visible or main.schematic.level != "block" \
+			or not is_same(main.schematic.block, b):
+		_fail("Show Coordinates must show the block level of the same block")
+	main.show_house_coordinates()
+	if main.schematic.level != "house" or not is_same(main.schematic.house, b["houses"][2]):
+		_fail("Selected House must show the coordinates of house 3")
+	main.back_to_3d()
+	if not view3d.visible or main.selected != 2 or view3d.build_count != builds or main.generation != gen:
+		_fail("Back to 3D must return to the same block and selection without rebuilding")
+	# Regenerate: same outline, a new validated block.
+	main.generate(BLOCKS[4][2] + 1)
+	if main.polygon != PackedVector2Array(pts) or main.block.is_empty() or is_same(main.block, b) \
+			or main.block["polygon"] != PackedVector2Array(pts) or not main.block["validation"]["valid"]:
+		_fail("Regenerate Houses must build a new valid block in the same outline")
+	# A failing outline shows a reason, never a block.
+	main.draw_new_block()
+	if not dv.points.is_empty() or not main.block.is_empty() or main.mode != "draw" or not view3d.model.get_children().is_empty():
+		_fail("Draw New Block must clear the outline and the houses")
+	dv.set_polygon(PackedVector2Array(SMALL_BLOCK))
+	main._on_polygon_closed(PackedVector2Array(SMALL_BLOCK))
+	if main.generate(1) or not main.block.is_empty() or main.mode != "draw" or not main.info.text.begins_with("GENERATION FAILED"):
+		_fail("a block that cannot hold 5 houses must show GENERATION FAILED and no houses")
 	if failures == 0:
-		print("navigation check OK: wraps 1↔5 without regenerating, one 3D build per selection; rotation never rebuilds; regeneration replaced all five")
+		print("UI check OK: draw → close → generate %d houses → select/rotate/coordinates without rebuilding → regenerate in the same outline; failure shown as error" % b["houses"].size())
 
 
 # --------------------------------------------------------------------------

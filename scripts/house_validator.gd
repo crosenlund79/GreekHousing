@@ -17,8 +17,11 @@ extends RefCounted
 ##   street_side: String  "north" | "south" | "east" | "west"
 ##   spaces:   [{id:int, kind:"room"|"courtyard"|"pastas"|"passage", type:String, rect:Rect2, [poly]}]
 ##   walls:    [{rect:Rect2, kind:"exterior"|"interior", orient:"h"|"v"|"d", [poly]}]   ("h" = runs east–west)
-##   openings: [{rect:Rect2, axis:"ns"|"ew", kind:"door"|"entrance"|"open", a:int, b:int}]
+##   openings: [{rect:Rect2, axis:"ns"|"ew", kind:"door"|"entrance"|"open", a:int, b:int, [poly]}]
 ##             axis is the direction of travel through the opening; b == STREET for the entrance.
+##             An entrance through a slanted exterior wall is a quadrilateral `poly`.
+##   block:    optional PackedVector2Array — the city block the house stands in;
+##             when present, the street frontage (H12) is measured on its boundary.
 ## `rect` is the exact shape unless `poly` is given, in which case `rect` is its
 ## bounding box and `poly` the exact shape (clipped rooms, mitred exterior walls).
 
@@ -40,8 +43,8 @@ const MIN_ROOMS := 4
 const MAX_ROOMS := 9
 const MIN_SIDES := 4
 const MAX_SIDES := 6
-const MIN_CLIPPED_ROOM_FILL := 0.75   # a clipped room keeps >= 75 % of its bounding box
-const MIN_CLIPPED_CORNER := 60.0      # degrees; no spiky corners where a slanted wall cuts a room
+const MIN_CLIPPED_ROOM_FILL := 0.60   # a clipped room keeps >= 60 % of its bounding box
+const MIN_CLIPPED_CORNER := 45.0      # degrees; no spiky corners where a slanted wall cuts a room
 const FORBIDDEN_ANGLE_MIN := 80.0     # H11: footprint interior angles in [80°, 110°] are forbidden
 const FORBIDDEN_ANGLE_MAX := 110.0
 const ANGLE_EPS := 1e-6
@@ -100,25 +103,52 @@ static func forbidden_angle(a: float) -> bool:
 	return a >= FORBIDDEN_ANGLE_MIN - ANGLE_EPS and a <= FORBIDDEN_ANGLE_MAX + ANGLE_EPS
 
 
-## Street frontage (H12): the longest footprint edge lying on the street line
-## (the outermost boundary line on the street side). Edges cannot be collinear
-## neighbours (H00), so one edge is one continuous stretch.
-## Returns {edge: index or -1, length, a, b}.
-static func street_frontage(house: Dictionary) -> Dictionary:
+## Street edges: footprint edges on the street. In a city block every edge
+## of the block polygon is a street, so these are the footprint edges lying
+## on the block boundary; for a standalone house, the edges on the outermost
+## line of its street side.
+static func street_edges(house: Dictionary) -> Array:
 	var fp: PackedVector2Array = house["footprint"]
+	var block: PackedVector2Array = house.get("block", PackedVector2Array())
 	var box := G.bbox(fp)
-	var best := {"edge": -1, "length": 0.0, "a": Vector2.ZERO, "b": Vector2.ZERO}
+	var out: Array = []
 	for i in fp.size():
 		var a := fp[i]
 		var b := fp[(i + 1) % fp.size()]
-		var on_line := false
-		match house["street_side"]:
-			"south": on_line = _near(a.y, box.end.y) and _near(b.y, box.end.y)
-			"north": on_line = _near(a.y, box.position.y) and _near(b.y, box.position.y)
-			"east": on_line = _near(a.x, box.end.x) and _near(b.x, box.end.x)
-			"west": on_line = _near(a.x, box.position.x) and _near(b.x, box.position.x)
-		if on_line and a.distance_to(b) > best["length"]:
-			best = {"edge": i, "length": a.distance_to(b), "a": a, "b": b}
+		var on_street := false
+		if not block.is_empty():
+			on_street = _segment_on_boundary(a, b, block)
+		else:
+			match house["street_side"]:
+				"south": on_street = _near(a.y, box.end.y) and _near(b.y, box.end.y)
+				"north": on_street = _near(a.y, box.position.y) and _near(b.y, box.position.y)
+				"east": on_street = _near(a.x, box.end.x) and _near(b.x, box.end.x)
+				"west": on_street = _near(a.x, box.position.x) and _near(b.x, box.position.x)
+		if on_street and a.distance_to(b) > EPS:
+			out.append({"edge": i, "length": a.distance_to(b), "a": a, "b": b})
+	return out
+
+
+## Street frontage (H12): the street edge holding the entrance if there is
+## one, else the longest street edge. Edges cannot be collinear neighbours
+## (H00), so one edge is one continuous stretch.
+## Returns {edge: index or -1, length, a, b}.
+static func street_frontage(house: Dictionary) -> Dictionary:
+	var best := {"edge": -1, "length": 0.0, "a": Vector2.ZERO, "b": Vector2.ZERO}
+	var faces: Array = []
+	for op in house["openings"]:
+		if op["kind"] == "entrance":
+			var ctx := {"footprint": house["footprint"], "by_id": {}}
+			for sp in house["spaces"]:
+				ctx["by_id"][sp["id"]] = sp
+			var f := _street_face(op, ctx)
+			if not f.is_empty():
+				faces.append(f)
+	for e in street_edges(house):
+		var holds := faces.any(func(f): return _segment_on_boundary(f[0], f[1], PackedVector2Array([e["a"], e["b"]])))
+		var best_holds: bool = best["edge"] >= 0 and faces.any(func(f): return _segment_on_boundary(f[0], f[1], PackedVector2Array([best["a"], best["b"]])))
+		if (holds and not best_holds) or (holds == best_holds and e["length"] > best["length"]):
+			best = e
 	return best
 
 
@@ -154,6 +184,9 @@ static func _check_structure(house: Dictionary, errors: Array) -> bool:
 		return false
 	if typeof(house["footprint"]) != TYPE_PACKED_VECTOR2_ARRAY:
 		errors.append("H00: footprint must be a PackedVector2Array polygon")
+		return false
+	if house.has("block") and typeof(house["block"]) != TYPE_PACKED_VECTOR2_ARRAY:
+		errors.append("H12: block must be a PackedVector2Array polygon")
 		return false
 	for s in house["spaces"]:
 		if not (s is Dictionary and s.has("id") and s.has("kind") and s.has("rect") and typeof(s["rect"]) == TYPE_RECT2):
@@ -218,6 +251,8 @@ static func _build_context(house: Dictionary, errors: Array) -> Dictionary:
 ## Returns "" when the opening lies exactly on a shared boundary of its two
 ## spaces (or of a space and the street), with the right thickness and width.
 static func _opening_problem(op: Dictionary, ctx: Dictionary) -> String:
+	if op.has("poly"):
+		return _slanted_entrance_problem(op, ctx)
 	var r: Rect2 = op["rect"]
 	var axis: String = op["axis"]
 	var kind: String = op["kind"]
@@ -241,6 +276,69 @@ static func _opening_problem(op: Dictionary, ctx: Dictionary) -> String:
 			and not (_side_ok(r, axis, op["b"], true, ctx) and _side_ok(r, axis, op["a"], false, ctx)):
 		return "does not sit on a boundary shared by its two spaces (floating or opening into a wall)"
 	return ""
+
+
+## An entrance cut through a slanted exterior wall: a quadrilateral whose outer
+## face lies on the footprint boundary, whose inner face lies on the boundary
+## of the space it serves, whose two jambs run along the direction of travel,
+## with the wall's thickness between the faces and a clear width >= 0.80 m.
+static func _slanted_entrance_problem(op: Dictionary, ctx: Dictionary) -> String:
+	if op["kind"] != "entrance":
+		return "only street entrances may be cut through slanted walls"
+	if not (op["a"] == STREET or op["b"] == STREET) or op["a"] == op["b"]:
+		return "an entrance must join one space to the street"
+	var inner: int = op["b"] if op["a"] == STREET else op["a"]
+	if not ctx["by_id"].has(inner):
+		return "unknown inner space"
+	var poly: PackedVector2Array = op["poly"]
+	if poly.size() != 4 or not _bbox(poly).is_equal_approx(op["rect"]):
+		return "gap must be a quadrilateral matching its extent"
+	var parts := _entrance_parts(op, ctx)
+	if parts.is_empty():
+		return "does not sit between the street face and the space it serves"
+	var outer: Array = parts["outer"]
+	var face: Array = parts["inner"]
+	var jambs: Array = parts["jambs"]
+	var travel := Vector2(0, 1) if op["axis"] == "ns" else Vector2(1, 0)
+	for j in jambs:
+		if absf((j[1] - j[0]).normalized().cross(travel)) > 1e-3:
+			return "jambs do not run along the direction of travel"
+	var u: Vector2 = (outer[1] - outer[0]).normalized()
+	for p in face:
+		if absf(absf(u.cross(p - outer[0])) - EXT_WALL) > EPS:
+			return "gap is not exactly through the %.2f m exterior wall" % EXT_WALL
+	var width := absf((jambs[0][0] - jambs[1][0]).dot(Vector2(1, 0) if op["axis"] == "ns" else Vector2(0, 1)))
+	if width < MIN_DOOR_WIDTH - EPS:
+		return "clear width %.2f m is below %.2f m" % [width, MIN_DOOR_WIDTH]
+	return ""
+
+
+## Splits a slanted entrance gap into its outer face (on the footprint
+## boundary), inner face (on the served space's boundary) and two jambs.
+## Returns {} if no such assignment exists.
+static func _entrance_parts(op: Dictionary, ctx: Dictionary) -> Dictionary:
+	var poly: PackedVector2Array = op["poly"]
+	var inner: int = op["b"] if op["a"] == STREET else op["a"]
+	if not ctx["by_id"].has(inner) or poly.size() != 4:
+		return {}
+	var space_shape := _shape(ctx["by_id"][inner])
+	for k in 4:
+		var o := [poly[k], poly[(k + 1) % 4]]
+		var f := [poly[(k + 2) % 4], poly[(k + 3) % 4]]
+		if _segment_on_boundary(o[0], o[1], ctx["footprint"]) and _segment_on_boundary(f[0], f[1], space_shape):
+			return {"outer": o, "inner": f, "jambs": [[poly[(k + 1) % 4], poly[(k + 2) % 4]], [poly[(k + 3) % 4], poly[k]]]}
+	return {}
+
+
+## Outer (street) face of a verified entrance, rect or slanted.
+static func _street_face(op: Dictionary, ctx: Dictionary) -> Array:
+	if op.has("poly"):
+		return _entrance_parts(op, ctx).get("outer", [])
+	for low in [true, false]:
+		var face := _face(op["rect"], op["axis"], low)
+		if _segment_on_boundary(face[0], face[1], ctx["footprint"]):
+			return face
+	return []
 
 
 ## Checks that space `id` (or the street) lies against the low (north/west) or
@@ -417,10 +515,11 @@ static func _check_h04(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 		if (e["a"] == pid and e["b"] == cid) or (e["a"] == cid and e["b"] == pid):
 			open_found = true
 			var seg: Rect2 = house["openings"][e["index"]]["rect"]
+			# A wall blocks the open edge if any of it lies on the edge line
+			# (tested against a 2 cm strip along the edge, with real wall shapes).
+			var strip := G.rect_poly(Rect2(seg.position.x, seg.position.y - 0.01, seg.size.x, 0.02))
 			for w in house["walls"]:
-				var wr: Rect2 = w["rect"]
-				if _span(wr.position.x, wr.end.x, seg.position.x, seg.end.x) > EPS \
-						and wr.position.y < seg.end.y - EPS and wr.end.y > seg.position.y + EPS:
+				if _overlap(w["rect"], Rect2(seg.position.x, seg.position.y - 0.01, seg.size.x, 0.02)) and _overlap_area(_shape(w), strip) > 1e-4:
 					errors.append("H04: a wall blocks the courtyard–pastas opening")
 					break
 	if not open_found:
@@ -499,7 +598,7 @@ static func _check_h06(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 			ext_area += _area(w)
 	for o in house["openings"]:
 		if o["kind"] == "entrance":
-			ext_area += (o["rect"] as Rect2).get_area()
+			ext_area += _area(o)
 	if absf(ext_area - ring_area) > TILE_TOL:
 		errors.append("H06: exterior walls do not form a continuous %.2f m perimeter (%.2f of %.2f m²)" % [EXT_WALL, ext_area, ring_area])
 	for room in ctx["rooms"]:
@@ -518,14 +617,26 @@ static func _check_h06(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 			errors.append("H06: %s is an unusable clipped shape: %s" % [_name(room["id"], ctx), _clipped_shape_problem(room["poly"], rr, true)])
 	for pas in ctx["passages"]:
 		var pr: Rect2 = pas["rect"]
-		if minf(pr.size.x, pr.size.y) < MIN_PASSAGE_WIDTH - EPS:
+		var pw := _min_width(pas["poly"]) if pas.has("poly") else minf(pr.size.x, pr.size.y)
+		if pw < MIN_PASSAGE_WIDTH - EPS:
 			errors.append("H06: entrance passage is narrower than %.1f m" % MIN_PASSAGE_WIDTH)
+		if pas.has("poly") and _clipped_shape_problem(pas["poly"], pr, false) != "":
+			errors.append("H06: entrance passage is an unusable clipped shape: %s" % _clipped_shape_problem(pas["poly"], pr, false))
 	# Doors must be real gaps cut into a single wall line: wall pieces of the
 	# same line and thickness must flank both ends of the opening.
 	var openings: Array = house["openings"]
 	for i in openings.size():
 		var op: Dictionary = openings[i]
 		if op["kind"] == "open":
+			continue
+		if op.has("poly"):
+			# Gap in a slanted wall: both jambs must be faces of exterior wall pieces.
+			var jambs: Array = _entrance_parts(op, ctx).get("jambs", [])
+			var flanked: bool = jambs.size() == 2
+			for j in jambs:
+				flanked = flanked and walls.any(func(w): return w["kind"] == "exterior" and _segment_on_boundary(j[0], j[1], _shape(w)))
+			if not flanked:
+				errors.append("H06: opening %d is not cut into a continuous wall" % i)
 			continue
 		var r: Rect2 = op["rect"]
 		var horiz: bool = op["axis"] == "ns"
@@ -606,32 +717,29 @@ static func _check_h07(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 
 static func _check_h08(house: Dictionary, ctx: Dictionary, errors: Array) -> void:
 	var side: String = house["street_side"]
+	var want: Vector2 = {"south": Vector2(0, 1), "north": Vector2(0, -1), "east": Vector2(1, 0), "west": Vector2(-1, 0)}.get(side, Vector2.ZERO)
 	var good := 0
 	for e in ctx["edges"]:
 		if e["kind"] != "entrance":
 			continue
 		var op: Dictionary = house["openings"][e["index"]]
-		var r: Rect2 = op["rect"]
-		# The street must be on the named side of the opening's outer face.
-		var expected_axis := "ns" if side in ["north", "south"] else "ew"
-		var street_low := side in ["north", "west"]
-		var face := _face(r, op["axis"], street_low)
-		if op["axis"] != expected_axis or not _segment_on_boundary(face[0], face[1], ctx["footprint"]):
+		# The outer face must be in the footprint wall facing the named street
+		# side (outward normal within 60° of that direction).
+		var face := _street_face(op, ctx)
+		if face.is_empty() or _outward_normal(face, ctx["footprint"]).dot(want) < 0.5:
 			errors.append("H08: entrance %d is not in the %s street wall" % [e["index"], side])
 			continue
+		# From the entrance the courtyard must be reached through circulation
+		# space only (passage, pastas), never through a room.
 		var inner: int = e["b"] if e["a"] == STREET else e["a"]
-		var kind: String = ctx["by_id"][inner]["kind"]
-		var leads := kind == "courtyard"
-		if kind == "passage" and ctx["courtyards"].size() == 1:
-			leads = _has_edge(ctx, inner, ctx["courtyards"][0]["id"])
-		if not leads:
+		if ctx["courtyards"].size() != 1 or not _reaches_through_circulation(ctx, inner, ctx["courtyards"][0]["id"]):
 			errors.append("H08: entrance %d does not lead to the courtyard through a passage" % e["index"])
 			continue
 		var blocked := false
 		for w in house["walls"]:
-			blocked = blocked or _items_overlap({"rect": r}, w)
+			blocked = blocked or _items_overlap(op, w)
 		for s in house["spaces"]:
-			blocked = blocked or _items_overlap({"rect": r}, s)
+			blocked = blocked or _items_overlap(op, s)
 		if blocked:
 			errors.append("H08: entrance %d is blocked by walls or room geometry" % e["index"])
 			continue
@@ -640,6 +748,32 @@ static func _check_h08(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 		errors.append("H08: no valid street-facing entrance in the exterior wall")
 	if ctx["courtyards"].size() == 1 and not _reachable_from_street(ctx).has(ctx["courtyards"][0]["id"]):
 		errors.append("H08: courtyard is not reachable from the entrance")
+
+
+## BFS from space `from` to `to` through passages, the pastas and the courtyard only.
+static func _reaches_through_circulation(ctx: Dictionary, from: int, to: int) -> bool:
+	var ok_kinds := ["passage", "pastas", "courtyard"]
+	if not ctx["by_id"].has(from) or not ctx["by_id"][from]["kind"] in ok_kinds:
+		return false
+	var seen := {from: true}
+	var queue: Array = [from]
+	while not queue.is_empty():
+		var n: int = queue.pop_front()
+		if n == to:
+			return true
+		for e in ctx["edges"]:
+			var other: int = e["b"] if e["a"] == n else (e["a"] if e["b"] == n else -999)
+			if ctx["by_id"].has(other) and ctx["by_id"][other]["kind"] in ok_kinds and not seen.has(other):
+				seen[other] = true
+				queue.append(other)
+	return false
+
+
+## Unit normal of a footprint boundary segment pointing out of the footprint.
+static func _outward_normal(face: Array, fp: PackedVector2Array) -> Vector2:
+	var n: Vector2 = (face[1] - face[0]).orthogonal().normalized()
+	var mid: Vector2 = (face[0] + face[1]) / 2.0
+	return -n if G.point_in_polygon(mid + n * 0.01, fp) else n
 
 
 # --------------------------------------------------------------------------
@@ -677,20 +811,25 @@ static func _check_h10(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 		# are aligned and the wing is exactly rooms + partition walls.
 		# End rooms may be trimmed where a slanted exterior wall crosses the wing,
 		# so the wing region is its bounding box intersected with the interior.
+		# Where the street front is slanted the tops follow it, so alignment is
+		# checked on the common south line; the wing region must then be exactly
+		# these rooms (plus an entrance passage) and their partitions, which also
+		# makes every one of them reach the exterior wall.
 		var nw: Rect2 = ctx["wing"]
 		var wing_area := 0.0
-		for r in ctx["north_rooms"]:
+		var members: Array = ctx["north_rooms"] + ctx["passages"].filter(func(p): return (p["rect"] as Rect2).end.y <= nw.end.y + EPS)
+		for r in members:
 			var rr: Rect2 = r["rect"]
-			if not (_near(rr.position.y, nw.position.y) and _near(rr.end.y, nw.end.y)):
+			if not _near(rr.end.y, nw.end.y) or rr.position.y > nw.position.y + MAX_ROOM_SPAN + 2.0:
 				errors.append("H10: %s does not span the full depth of the northern wing" % _name(r["id"], ctx))
 			wing_area += _area(r)
 		for s in house["spaces"]:
-			if not ctx["north_rooms"].has(s) and _items_overlap(s, {"rect": nw}):
+			if not members.has(s) and _items_overlap(s, {"rect": nw}):
 				errors.append("H10: %s intrudes into the northern wing" % _name(s["id"], ctx))
 		for w in house["walls"]:
 			if w["kind"] == "interior" and _items_overlap(w, {"rect": nw}):
 				var wr: Rect2 = w["rect"]
-				if w["kind"] != "interior" or w["orient"] != "v" or not (_near(wr.position.y, nw.position.y) and _near(wr.end.y, nw.end.y)):
+				if w["orient"] != "v" or not _near(wr.end.y, nw.end.y):
 					errors.append("H10: wall inside the northern wing is not a full-depth north–south partition")
 				wing_area += _area(w)
 		var wing_region := _overlap_area(_rect_poly(nw), interior)
@@ -781,23 +920,21 @@ static func _check_h11(ctx: Dictionary, errors: Array) -> void:
 # --------------------------------------------------------------------------
 
 static func _check_h12(house: Dictionary, ctx: Dictionary, errors: Array) -> void:
-	var front := street_frontage(house)
-	if front["edge"] < 0:
-		errors.append("H12: footprint has no edge on the %s street boundary" % house["street_side"])
+	var where := "block boundary" if house.has("block") else "%s street boundary" % house["street_side"]
+	if street_edges(house).is_empty():
+		errors.append("H12: footprint has no edge on the %s" % where)
 		return
-	if front["length"] < MIN_STREET_FRONTAGE - EPS:
-		errors.append("H12.1: continuous street frontage is %.2f m (minimum %.1f m)" % [front["length"], MIN_STREET_FRONTAGE])
-	# Direct access: a verified entrance whose outer face lies on the frontage edge.
+	# Direct access: a verified entrance whose outer face lies on a street edge.
+	var front := street_frontage(house)
 	var direct := false
 	for e in ctx["edges"]:
-		if e["kind"] != "entrance":
-			continue
-		var op: Dictionary = house["openings"][e["index"]]
-		for low in [true, false]:
-			var face := _face(op["rect"], op["axis"], low)
-			direct = direct or _segment_on_boundary(face[0], face[1], PackedVector2Array([front["a"], front["b"]]))
+		if e["kind"] == "entrance":
+			var face := _street_face(house["openings"][e["index"]], ctx)
+			direct = direct or (not face.is_empty() and _segment_on_boundary(face[0], face[1], PackedVector2Array([front["a"], front["b"]])))
 	if not direct:
-		errors.append("H12: no entrance opens directly onto the street frontage")
+		errors.append("H12: no entrance opens directly onto the street frontage (%s)" % where)
+	if front["length"] < MIN_STREET_FRONTAGE - EPS:
+		errors.append("H12.1: continuous street frontage is %.2f m (minimum %.1f m)" % [front["length"], MIN_STREET_FRONTAGE])
 
 
 # --------------------------------------------------------------------------
