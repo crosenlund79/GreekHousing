@@ -10,8 +10,8 @@ config/features=PackedStringArray("4.3")
 
 [display]
 
-window/size/viewport_width=1600
-window/size/viewport_height=760
+window/size/viewport_width=1280
+window/size/viewport_height=800
 window/stretch/aspect="expand"
 
 [rendering]
