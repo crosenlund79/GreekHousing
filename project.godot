@@ -1,0 +1,20 @@
+; Engine configuration file.
+config_version=5
+
+[application]
+
+config/name="Greek House Generator"
+config/description="Procedural Classical Greek (Olynthian pastas-type) house plans with strict rule validation."
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.3")
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=760
+window/stretch/aspect="expand"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
