@@ -1,11 +1,12 @@
 extends RefCounted
-## Hard-rule validator for generated house data (rules H00–H10).
+## Hard-rule validator for generated house data (rules H00–H11).
 ##
 ## Works only on the structured house Dictionary produced by house_generator.gd
 ## (or built by hand in tests). It never looks at rendering, and it derives
 ## every checked quantity (side count, areas, wing orientation, access) from
 ## the geometry itself rather than from descriptive metadata.
 ## A house is valid only when validate_house() returns valid == true.
+## Rules H00–H11; H11 forbids footprint corners between 80° and 110°.
 ##
 ## Coordinates are metres: X grows east, Y grows south, north is up.
 ##
@@ -36,6 +37,10 @@ const MAX_ROOMS := 9
 const MIN_SIDES := 4
 const MAX_SIDES := 6
 const MIN_CLIPPED_ROOM_FILL := 0.75   # a clipped room keeps >= 75 % of its bounding box
+const MIN_CLIPPED_CORNER := 60.0      # degrees; no spiky corners where a slanted wall cuts a room
+const FORBIDDEN_ANGLE_MIN := 80.0     # H11: footprint interior angles in [80°, 110°] are forbidden
+const FORBIDDEN_ANGLE_MAX := 110.0
+const ANGLE_EPS := 1e-6
 const ROOM_TYPES := ["Domestic room", "Storage", "Kitchen / hearth", "Andron", "Workroom"]
 
 const STREET := -1
@@ -62,6 +67,7 @@ static func validate_house(house: Dictionary) -> Dictionary:
 	_check_h08(house, ctx, errors)
 	_check_h09(house, ctx, errors)
 	_check_h10(house, ctx, errors)
+	_check_h11(ctx, errors)
 	return {"valid": errors.is_empty(), "errors": errors, "sides": sides}
 
 
@@ -75,6 +81,19 @@ static func count_sides(poly: PackedVector2Array) -> int:
 		if e0.length() > EPS and e1.length() > EPS and absf(e0.normalized().cross(e1.normalized())) > 1e-6:
 			n += 1
 	return n
+
+
+## Interior angle (degrees) at every vertex of a simple polygon; reflex
+## corners are > 180°. Computed from the geometry, for H11 and the tests.
+static func interior_angles(poly: PackedVector2Array) -> Array:
+	var orient := 1.0 if _signed_area(poly) > 0.0 else -1.0
+	var out: Array = []
+	for i in poly.size():
+		var e0 := poly[i] - poly[i - 1]
+		var e1 := poly[(i + 1) % poly.size()] - poly[i]
+		var turn := rad_to_deg(atan2(e0.cross(e1), e0.dot(e1)))
+		out.append(180.0 - turn * orient)
+	return out
 
 
 ## Polygon shrunk by distance d (simple polygons whose inset keeps the same
@@ -279,6 +298,8 @@ static func _check_h01(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 	var area := _area(court)
 	if absf(area - COURTYARD_AREA) > COURTYARD_AREA_TOL:
 		errors.append("H01: Courtyard area incorrect (%.3f m², required %.3f m²)" % [area, COURTYARD_AREA])
+	if court.has("poly"):
+		errors.append("H01: courtyard must be an unclipped rectangle")
 	if _outside_area(_shape(court), ctx["interior"]) > TILE_TOL:
 		errors.append("H01: courtyard is not contained in the interior of the footprint")
 	for s in house["spaces"]:
@@ -312,8 +333,9 @@ static func _check_h02(_house: Dictionary, ctx: Dictionary, errors: Array) -> vo
 		var c: Rect2 = ctx["courtyards"][0]["rect"]
 		if nw.end.y > c.position.y + EPS:
 			errors.append("H02: northern wing is not north of the courtyard")
-	if _outside_area(_rect_poly(nw), ctx["interior"]) > TILE_TOL:
-		errors.append("H02: northern wing lies outside the footprint interior")
+	for r in north:
+		if _outside_area(_shape(r), ctx["interior"]) > TILE_TOL:
+			errors.append("H02: northern wing room %d lies outside the footprint interior" % r["id"])
 	var linked := false
 	for r in north:
 		linked = linked or _has_edge(ctx, r["id"], ctx["pastas"][0]["id"])
@@ -349,8 +371,10 @@ static func _check_h04(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 		return
 	var p: Rect2 = ctx["pastas"][0]["rect"]
 	var pid: int = ctx["pastas"][0]["id"]
-	if ctx["pastas"][0].has("poly"):
-		errors.append("H04: pastas must be a rectangular portico")
+	# Where slanted exterior walls trim the pastas ends, the pastas must stay a
+	# convex portico without spiky corners.
+	if ctx["pastas"][0].has("poly") and _clipped_shape_problem(ctx["pastas"][0]["poly"], p, false) != "":
+		errors.append("H04: pastas is an unusable clipped shape: %s" % _clipped_shape_problem(ctx["pastas"][0]["poly"], p, false))
 	if p.size.y < PASTAS_MIN_DEPTH - EPS or p.size.y > PASTAS_MAX_DEPTH + EPS:
 		errors.append("H04: pastas depth %.2f m outside %.1f–%.1f m" % [p.size.y, PASTAS_MIN_DEPTH, PASTAS_MAX_DEPTH])
 	if not (p.size.x > p.size.y + EPS):
@@ -432,11 +456,13 @@ static func _check_h06(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 				errors.append("H06: exterior wall %d is thicker than %.2f m (intrudes into the interior)" % [i, EXT_WALL])
 		elif w["kind"] == "interior":
 			var t := r.size.y if w["orient"] == "h" else r.size.x
-			if w.has("poly") or not (w["orient"] == "h" or w["orient"] == "v"):
+			if not (w["orient"] == "h" or w["orient"] == "v"):
 				errors.append("H06: interior wall %d is not an axis-aligned wall segment" % i)
 			elif absf(t - INT_WALL) > EPS:
 				errors.append("H06: interior wall %d is %.2f m thick (required %.2f m)" % [i, t, INT_WALL])
-			if _outside_area(_rect_poly(r), interior) > TILE_TOL:
+			if w.has("poly") and not _bbox(w["poly"]).is_equal_approx(r):
+				errors.append("H06: interior wall %d shape does not match its extent" % i)
+			if _outside_area(_shape(w), interior) > TILE_TOL:
 				errors.append("H06: interior wall %d is outside the interior" % i)
 		else:
 			errors.append("H06: wall %d has unknown kind '%s'" % [i, w["kind"]])
@@ -452,7 +478,9 @@ static func _check_h06(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 		errors.append("H06: exterior walls do not form a continuous %.2f m perimeter (%.2f of %.2f m²)" % [EXT_WALL, ext_area, ring_area])
 	for room in ctx["rooms"]:
 		var rr: Rect2 = room["rect"]
-		var short_side := minf(rr.size.x, rr.size.y)
+		# Clear width/span of a clipped room is its minimum width across any
+		# direction (rotating calipers), not its bounding box.
+		var short_side := _min_width(room["poly"]) if room.has("poly") else minf(rr.size.x, rr.size.y)
 		var area := _area(room)
 		if short_side < MIN_ROOM_WIDTH - EPS:
 			errors.append("H06: %s is %.2f m wide (minimum %.1f m)" % [_name(room["id"], ctx), short_side, MIN_ROOM_WIDTH])
@@ -460,8 +488,8 @@ static func _check_h06(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 			errors.append("H06: %s area %.2f m² (minimum %.1f m²)" % [_name(room["id"], ctx), area, MIN_ROOM_AREA])
 		if short_side > MAX_ROOM_SPAN + EPS:
 			errors.append("H06: %s clear span %.2f m exceeds %.1f m" % [_name(room["id"], ctx), short_side, MAX_ROOM_SPAN])
-		if room.has("poly") and not _usable_clipped_room(room["poly"], rr):
-			errors.append("H06: %s is an unusable clipped shape (sliver or acute corner)" % _name(room["id"], ctx))
+		if room.has("poly") and _clipped_shape_problem(room["poly"], rr, true) != "":
+			errors.append("H06: %s is an unusable clipped shape: %s" % [_name(room["id"], ctx), _clipped_shape_problem(room["poly"], rr, true)])
 	for pas in ctx["passages"]:
 		var pr: Rect2 = pas["rect"]
 		if minf(pr.size.x, pr.size.y) < MIN_PASSAGE_WIDTH - EPS:
@@ -491,23 +519,48 @@ static func _check_h06(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 			errors.append("H06: opening %d is not cut into a continuous wall" % i)
 
 
-## A clipped room must stay convex, have no corner sharper than 90° and keep
-## most of its bounding box, so a slanted exterior wall leaves no sliver.
-static func _usable_clipped_room(poly: PackedVector2Array, box: Rect2) -> bool:
-	if not _near(_bbox(poly).position.x, box.position.x) or not _near(_bbox(poly).end.y, box.end.y) \
-			or not _near(_bbox(poly).end.x, box.end.x) or not _near(_bbox(poly).position.y, box.position.y):
-		return false
-	var turn := 0.0
+## A room or pastas trimmed by a slanted exterior wall must stay convex, have
+## no corner sharper than MIN_CLIPPED_CORNER, keep most of its bounding box and
+## (rooms) stay at least MIN_ROOM_WIDTH wide in every direction, so the
+## slanted boundary leaves no sliver. Returns "" when usable.
+static func _clipped_shape_problem(poly: PackedVector2Array, box: Rect2, is_room: bool) -> String:
+	if not _bbox(poly).is_equal_approx(box):
+		return "shape does not match its extent"
+	var orient := 0.0
 	for i in poly.size():
-		var e0 := (poly[i] - poly[i - 1]).normalized()
-		var e1 := (poly[(i + 1) % poly.size()] - poly[i]).normalized()
-		var cr := e0.cross(e1)
-		if turn != 0.0 and signf(cr) != signf(turn):
-			return false   # not convex
-		turn = cr if absf(cr) > 1e-6 else turn
-		if e0.dot(e1) < -EPS:
-			return false   # turn sharper than 90°: interior angle below 90°
-	return absf(_signed_area(poly)) >= MIN_CLIPPED_ROOM_FILL * box.get_area()
+		var e0 := poly[i] - poly[i - 1]
+		var e1 := poly[(i + 1) % poly.size()] - poly[i]
+		var cr := e0.normalized().cross(e1.normalized())
+		if absf(cr) <= 1e-6:
+			continue   # collinear point
+		if orient != 0.0 and signf(cr) != orient:
+			return "not convex"
+		orient = signf(cr)
+	for a in interior_angles(poly):
+		if a < MIN_CLIPPED_CORNER - EPS:
+			return "corner of %.1f° is sharper than %.0f°" % [a, MIN_CLIPPED_CORNER]
+	if absf(_signed_area(poly)) < MIN_CLIPPED_ROOM_FILL * box.get_area():
+		return "fills less than %d %% of its extent (sliver)" % int(MIN_CLIPPED_ROOM_FILL * 100)
+	if is_room and _min_width(poly) < MIN_ROOM_WIDTH - EPS:
+		return "narrower than %.1f m" % MIN_ROOM_WIDTH
+	return ""
+
+
+## Minimum width of a convex polygon: over all edges, the largest distance of
+## any vertex from that edge's line; the smallest such value.
+static func _min_width(poly: PackedVector2Array) -> float:
+	var best := INF
+	for i in poly.size():
+		var a := poly[i]
+		var u := poly[(i + 1) % poly.size()] - a
+		if u.length() <= EPS:
+			continue
+		u = u.normalized()
+		var far := 0.0
+		for p in poly:
+			far = maxf(far, absf(u.cross(p - a)))
+		best = minf(best, far)
+	return best
 
 
 # --------------------------------------------------------------------------
@@ -596,24 +649,27 @@ static func _check_h10(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 	if not ctx["north_rooms"].is_empty():
 		# Northern wing: every room spans the full wing depth, so its cross walls
 		# are aligned and the wing is exactly rooms + partition walls.
+		# End rooms may be trimmed where a slanted exterior wall crosses the wing,
+		# so the wing region is its bounding box intersected with the interior.
 		var nw: Rect2 = ctx["wing"]
 		var wing_area := 0.0
 		for r in ctx["north_rooms"]:
 			var rr: Rect2 = r["rect"]
-			if r.has("poly") or not (_near(rr.position.y, nw.position.y) and _near(rr.end.y, nw.end.y)):
+			if not (_near(rr.position.y, nw.position.y) and _near(rr.end.y, nw.end.y)):
 				errors.append("H10: %s does not span the full depth of the northern wing" % _name(r["id"], ctx))
-			wing_area += rr.get_area()
+			wing_area += _area(r)
 		for s in house["spaces"]:
 			if not ctx["north_rooms"].has(s) and _items_overlap(s, {"rect": nw}):
 				errors.append("H10: %s intrudes into the northern wing" % _name(s["id"], ctx))
 		for w in house["walls"]:
-			if _items_overlap(w, {"rect": nw}):
+			if w["kind"] == "interior" and _items_overlap(w, {"rect": nw}):
 				var wr: Rect2 = w["rect"]
 				if w["kind"] != "interior" or w["orient"] != "v" or not (_near(wr.position.y, nw.position.y) and _near(wr.end.y, nw.end.y)):
 					errors.append("H10: wall inside the northern wing is not a full-depth north–south partition")
 				wing_area += _area(w)
-		if absf(wing_area - nw.get_area()) > TILE_TOL:
-			errors.append("H10: northern wing is not geometrically coherent (rooms and partitions cover %.2f of %.2f m²)" % [wing_area, nw.get_area()])
+		var wing_region := _overlap_area(_rect_poly(nw), interior)
+		if absf(wing_area - wing_region) > TILE_TOL:
+			errors.append("H10: northern wing is not geometrically coherent (rooms and partitions cover %.2f of %.2f m²)" % [wing_area, wing_region])
 
 	# Every interior wall piece must be supported at both ends — by another wall,
 	# by the door gap it continues across, or by the exterior wall band — and be
@@ -636,8 +692,19 @@ static func _check_h10(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 		var horiz: bool = w["orient"] == "h"
 		var ends := [_face(r, "ew" if horiz else "ns", true), _face(r, "ew" if horiz else "ns", false)]
 		var ok := [false, false]
+		# A wall trimmed by a slanted exterior wall ends on the interior boundary
+		# with a slanted face (an edge of its poly).
+		if w.has("poly"):
+			var poly: PackedVector2Array = w["poly"]
+			for e in poly.size():
+				var a := poly[e]
+				var b := poly[(e + 1) % poly.size()]
+				if a.distance_to(b) > EPS and _segment_on_boundary(a, b, interior):
+					var mid := (a + b) / 2.0
+					var along := mid.x - r.get_center().x if horiz else mid.y - r.get_center().y
+					ok[0 if along < 0.0 else 1] = true
 		for k in 2:
-			ok[k] = _segment_on_boundary(ends[k][0], ends[k][1], interior)
+			ok[k] = ok[k] or _segment_on_boundary(ends[k][0], ends[k][1], interior)
 			for j in parts.size():
 				if j == i or ok[k]:
 					continue
@@ -656,7 +723,8 @@ static func _check_h10(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 	var linked := {}
 	var queue: Array = []
 	for i in parts.size():
-		if _rect_touches_boundary(parts[i]["rect"], interior):
+		var wall = parts[i]["wall"]
+		if _touches_boundary(wall["poly"] if wall != null and wall.has("poly") else _rect_poly(parts[i]["rect"]), interior):
 			linked[i] = true
 			queue.append(i)
 	while not queue.is_empty():
@@ -668,6 +736,18 @@ static func _check_h10(house: Dictionary, ctx: Dictionary, errors: Array) -> voi
 	for i in parts.size():
 		if parts[i]["wall"] != null and not linked.has(i):
 			errors.append("H10: wall at (%.2f, %.2f) is a floating structural element" % [parts[i]["rect"].position.x, parts[i]["rect"].position.y])
+
+
+# --------------------------------------------------------------------------
+# H11 — No footprint corner between 80° and 110° (inclusive)
+# --------------------------------------------------------------------------
+
+static func _check_h11(ctx: Dictionary, errors: Array) -> void:
+	var angles := interior_angles(ctx["footprint"])
+	for i in angles.size():
+		var a: float = angles[i]
+		if a >= FORBIDDEN_ANGLE_MIN - ANGLE_EPS and a <= FORBIDDEN_ANGLE_MAX + ANGLE_EPS:
+			errors.append("H11: footprint corner %d has an interior angle of %.2f° (80°–110° is forbidden)" % [i, a])
 
 
 # --------------------------------------------------------------------------
@@ -808,9 +888,10 @@ static func _segment_on_boundary(a: Vector2, b: Vector2, poly: PackedVector2Arra
 	return false
 
 
-static func _rect_touches_boundary(r: Rect2, poly: PackedVector2Array) -> bool:
-	var c := _rect_poly(r)
-	for i in 4:
-		if _segment_on_boundary(c[i], c[(i + 1) % 4], poly):
+static func _touches_boundary(shape: PackedVector2Array, poly: PackedVector2Array) -> bool:
+	for i in shape.size():
+		var a := shape[i]
+		var b := shape[(i + 1) % shape.size()]
+		if a.distance_to(b) > EPS and _segment_on_boundary(a, b, poly):
 			return true
 	return false

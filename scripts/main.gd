@@ -1,18 +1,26 @@
 extends Control
-## Main screen: five stored, validated houses shown one at a time.
-## Navigation only changes which stored house is displayed; only
-## "Regenerate All Houses" generates (and validates) new data.
+## Main screen: five stored, validated houses shown one at a time, as a 3D
+## cutaway (default) or as the 2D plan.
+## Navigation only changes which stored house is displayed (and rebuilds the
+## 3D model for it); only "Regenerate All Houses" generates and validates new
+## data. Camera rotation never regenerates or rebuilds anything.
 
 const Generator := preload("res://scripts/house_generator.gd")
 const HouseView := preload("res://scripts/house_view.gd")
+const House3DView := preload("res://scripts/house_3d_view.gd")
 const HOUSE_COUNT := 5
 
 var houses: Array = []      # generate_valid_house() results, one per slot
 var index := 0
 var generation := 0         # number of times the five houses were (re)generated
-var view: Control
+var plan_mode := false      # true = show the 2D plan instead of the 3D view
+var view3d: SubViewportContainer
+var plan_view: Control
 var counter: Label
+var info: Label
 var status: Label
+var rotate_buttons: Array = []
+var plan_button: Button
 
 
 func _ready() -> void:
@@ -22,57 +30,78 @@ func _ready() -> void:
 	add_child(bg)
 
 	var root := VBoxContainer.new()
-	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT, Control.PRESET_MODE_MINSIZE, 10)
-	root.add_theme_constant_override("separation", 8)
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT, Control.PRESET_MODE_MINSIZE, 8)
+	root.add_theme_constant_override("separation", 6)
 	add_child(root)
 
 	var title := Label.new()
 	title.text = "Ancient Greek House Generator"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 24)
+	title.add_theme_font_size_override("font_size", 22)
 	title.add_theme_color_override("font_color", Color(0.2, 0.16, 0.12))
 	root.add_child(title)
 
-	# Wraps onto two lines on narrow windows.
+	# Wraps onto several lines on narrow windows.
 	var bar := HFlowContainer.new()
 	bar.alignment = FlowContainer.ALIGNMENT_CENTER
-	bar.add_theme_constant_override("h_separation", 10)
+	bar.add_theme_constant_override("h_separation", 8)
 	bar.add_theme_constant_override("v_separation", 6)
 	root.add_child(bar)
-	var prev := _button("◀", show_previous, Vector2(48, 34))
-	prev.tooltip_text = "Previous house"
-	bar.add_child(prev)
+	var nav := HBoxContainer.new()
+	bar.add_child(nav)
+	nav.add_child(_button("◀", show_previous, Vector2(44, 34), "Previous house"))
 	counter = Label.new()
 	counter.custom_minimum_size = Vector2(96, 34)
 	counter.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	counter.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	counter.add_theme_font_size_override("font_size", 17)
 	counter.add_theme_color_override("font_color", Color(0.2, 0.16, 0.12))
-	bar.add_child(counter)
-	var next := _button("▶", show_next, Vector2(48, 34))
-	next.tooltip_text = "Next house"
-	bar.add_child(next)
-	bar.add_child(_button("Regenerate All Houses", regenerate_all, Vector2(200, 34)))
+	nav.add_child(counter)
+	nav.add_child(_button("▶", show_next, Vector2(44, 34), "Next house"))
+	var turn := HBoxContainer.new()
+	bar.add_child(turn)
+	rotate_buttons = [
+		_button("↶ Rotate Left", rotate_left, Vector2(0, 34), "Turn the view 45° counter-clockwise"),
+		_button("Rotate Right ↷", rotate_right, Vector2(0, 34), "Turn the view 45° clockwise"),
+	]
+	for b in rotate_buttons:
+		turn.add_child(b)
+	bar.add_child(_button("Regenerate All Houses", regenerate_all, Vector2(0, 34), "Generate and validate five new houses"))
+	plan_button = _button("2D Plan", toggle_plan, Vector2(0, 34), "Switch between the 3D view and the 2D plan")
+	bar.add_child(plan_button)
 
-	view = Control.new()
-	view.set_script(HouseView)
-	view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	view.custom_minimum_size = Vector2(200, 200)
-	root.add_child(view)
+	info = Label.new()
+	info.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	info.add_theme_font_size_override("font_size", 13)
+	root.add_child(info)
+
+	var stage := Control.new()
+	stage.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	stage.custom_minimum_size = Vector2(200, 180)
+	root.add_child(stage)
+	view3d = House3DView.new()
+	view3d.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	stage.add_child(view3d)
+	plan_view = Control.new()
+	plan_view.set_script(HouseView)
+	plan_view.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	stage.add_child(plan_view)
 
 	status = Label.new()
 	status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	status.add_theme_font_size_override("font_size", 12)
+	status.add_theme_font_size_override("font_size", 11)
 	status.add_theme_color_override("font_color", Color(0.3, 0.26, 0.22))
 	root.add_child(status)
 
 	regenerate_all()
 
 
-func _button(text: String, action: Callable, min_size: Vector2) -> Button:
+func _button(text: String, action: Callable, min_size: Vector2, tip: String) -> Button:
 	var b := Button.new()
 	b.text = text
 	b.custom_minimum_size = min_size
+	b.tooltip_text = tip
 	b.pressed.connect(action)
 	return b
 
@@ -105,9 +134,9 @@ func regenerate_all() -> void:
 	index = 0
 	_show_current()
 	var ms := (Time.get_ticks_usec() - t0) / 1000.0
-	status.text = ("%d/%d houses valid (H00–H10) · %d candidates rejected · generated and validated in %.1f ms · base seed %d.  "
-		+ "Classical Greek pastas houses after the Olynthian type; street to the south. "
-		+ "The 16 m² courtyard and all dimensions are project constraints, not ancient standards.") \
+	status.text = ("%d/%d houses valid (H00–H11) · %d candidates rejected · generated, validated and built in %.1f ms · base seed %d.  "
+		+ "Classical Greek pastas houses after the Olynthian type; street to the south. Walls are cut away at 0.8 m to show the plan. "
+		+ "The 16 m² courtyard, footprint shapes and all dimensions are project constraints, not ancient standards.") \
 		% [valid, HOUSE_COUNT, rejected, ms, base_seed]
 
 
@@ -125,9 +154,44 @@ func show_previous() -> void:
 	_show_current()
 
 
+func rotate_left() -> void:
+	view3d.rotate_view(-1)
+
+
+func rotate_right() -> void:
+	view3d.rotate_view(1)
+
+
+func toggle_plan() -> void:
+	plan_mode = not plan_mode
+	_show_current()
+
+
+## Displays the selected stored house. Only a validated house reaches the 3D
+## view; a failed slot shows the generation error panel instead.
 func _show_current() -> void:
+	var result: Dictionary = houses[index]
+	var valid: bool = result["ok"] and result["house"].get("validation", {}).get("valid", false)
 	counter.text = "House %d / %d" % [index + 1, houses.size()]
-	view.show_result(houses[index], index + 1, houses.size())
+	plan_view.show_result(result, index + 1, houses.size())
+	var shown_3d: bool = valid and view3d.show_house(result["house"])
+	if not valid:
+		view3d.clear()
+	view3d.visible = shown_3d and not plan_mode
+	plan_view.visible = not view3d.visible
+	for b in rotate_buttons:
+		b.disabled = not view3d.visible
+	plan_button.text = "3D View" if plan_mode else "2D Plan"
+	if valid:
+		var h: Dictionary = result["house"]
+		var fp_box: Rect2 = view3d._bbox(h["footprint"])
+		info.text = "VALID H00–H11 · %d exterior sides (%s) · %d rooms · %.1f × %.1f m · seed %d" % [
+			h["validation"]["sides"], h["shape"], h["spaces"].filter(func(s): return s["kind"] == "room").size(),
+			fp_box.size.x, fp_box.size.y, h["seed"]]
+		info.add_theme_color_override("font_color", Color(0.15, 0.42, 0.2))
+	else:
+		info.text = "GENERATION ERROR — no valid house for this slot; nothing is displayed as a house."
+		info.add_theme_color_override("font_color", Color(0.7, 0.15, 0.12))
 
 
 static func _signature(house: Dictionary) -> String:

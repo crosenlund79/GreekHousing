@@ -104,7 +104,7 @@ func _draw_heading(font: Font, heading: String, detail: String) -> void:
 	if detail != "":
 		var badge := Rect2(x, 10, 112, 22)
 		draw_rect(badge, Color(0.2, 0.55, 0.28))
-		draw_string(font, Vector2(badge.position.x, 26), "VALID H00–H10", HORIZONTAL_ALIGNMENT_CENTER, badge.size.x, 12, Color.WHITE)
+		draw_string(font, Vector2(badge.position.x, 26), "VALID H00–H11", HORIZONTAL_ALIGNMENT_CENTER, badge.size.x, 12, Color.WHITE)
 		draw_string(font, Vector2(12, 48), detail, HORIZONTAL_ALIGNMENT_LEFT, size.x - 60.0, 13, Color(INK, 0.8))
 
 
