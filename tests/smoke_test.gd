@@ -2,12 +2,15 @@ extends SceneTree
 ## Headless smoke test:
 ##   godot --headless --path . --script res://tests/smoke_test.gd </dev/null
 ## - generates seeded 4-, 5- and 6-sided houses and re-validates each one
-##   independently (H00–H11), recomputing side count and corner angles from
+##   independently (H00–H12), recomputing side count and corner angles from
 ##   the polygon;
 ## - negative checks proving the validator rejects broken houses;
 ## - 3D checks: meshes read back from the 3D view match the validated data
 ##   (exterior polygon, courtyard, walls, open doors), rotation moves only the
 ##   camera;
+## - coordinate schematic: same geometry as the 3D meshes, vertex coordinates,
+##   shoelace areas, courtyard 16 m², H11 angles, room picking, and switching
+##   views without regenerating;
 ## - UI checks: navigation shows stored houses without regenerating and builds
 ##   only the selected house's 3D model; regeneration replaces all five.
 ## Exits with status 1 on any failure.
@@ -15,6 +18,8 @@ extends SceneTree
 const Generator := preload("res://scripts/house_generator.gd")
 const Validator := preload("res://scripts/house_validator.gd")
 const House3DView := preload("res://scripts/house_3d_view.gd")
+const SchematicView := preload("res://scripts/house_schematic_view.gd")
+const G := preload("res://scripts/geometry.gd")
 const PER_SIDE_COUNT := 8
 
 var failures := 0
@@ -41,6 +46,7 @@ func _process(_delta: float) -> bool:
 	if _frames == 1:
 		for sides in samples:
 			_3d_checks(samples[sides], sides)
+		_schematic_switch_checks()
 		_navigation_checks()
 		main.queue_free()   # release meshes before the engine shuts down
 		return false
@@ -171,6 +177,7 @@ func _3d_checks(house: Dictionary, sides: int) -> void:
 		if not Geometry2D.is_point_in_polygon(p, fp) and not Validator._segment_on_boundary(p, p, fp):
 			_fail("%s: exterior wall point %s lies outside the footprint" % [tag, p])
 			break
+	_schematic_checks(house, sides, floors, ext_points)
 
 	# Rotation moves the camera around the centre; the model is untouched.
 	var before := _model_state(view)
@@ -192,6 +199,102 @@ func _3d_checks(house: Dictionary, sides: int) -> void:
 	if failures == 0:
 		print("%s check OK: %d floors, %d walls, %d open gaps match the data; rotation keeps the model" % [tag, floors.size(), walls.size(), gaps.size()])
 	view.queue_free()
+
+
+# --------------------------------------------------------------------------
+# Coordinate schematic
+# --------------------------------------------------------------------------
+
+## The schematic must show exactly the geometry the 3D meshes were built from.
+func _schematic_checks(house: Dictionary, sides: int, floors: Dictionary, ext_points: PackedVector2Array) -> void:
+	var tag := "schematic (%d sides)" % sides
+	var view: Control = SchematicView.new()
+	view.size = Vector2(1200, 800)
+	root.add_child(view)
+	if not view.show_house(house, "House test"):
+		_fail("%s: validated house refused" % tag)
+		view.queue_free()
+		return
+	var m: Dictionary = view._m
+	var text: String = view.inspection_text()
+	var fp: PackedVector2Array = house["footprint"]
+	# Exterior vertices: the stored polygon itself, each a corner of the 3D exterior walls.
+	if m["footprint"] != fp:
+		_fail("%s: footprint differs from the house data" % tag)
+	for i in fp.size():
+		if not Array(ext_points).any(func(p): return p.distance_to(fp[i]) < 1e-4):
+			_fail("%s: P%d is not a corner of the 3D exterior walls" % [tag, i])
+		if not text.contains("P%d: (%.2f, %.2f)" % [i, fp[i].x, fp[i].y]):
+			_fail("%s: panel does not list P%d with its coordinates" % [tag, i])
+		var e: float = m["edges"][i]
+		if absf(e - fp[i].distance_to(fp[(i + 1) % fp.size()])) > 1e-9:
+			_fail("%s: edge %d length is wrong" % [tag, i])
+	# Angles: identical to the validator's H11 measurement, none forbidden, all displayed.
+	var angles := Validator.interior_angles(fp)
+	for i in angles.size():
+		if absf(m["angles"][i] - angles[i]) > 1e-9 or Validator.forbidden_angle(m["angles"][i]):
+			_fail("%s: angle at P%d differs from H11 validation or is forbidden" % [tag, i])
+		if not text.contains("angle %.2f°" % angles[i]):
+			_fail("%s: panel does not show the angle at P%d" % [tag, i])
+	# Areas: shoelace on the actual outline, equal to the 3D floor mesh area.
+	var polygonal := 0
+	for sp in m["spaces"]:
+		var data: Dictionary = house["spaces"].filter(func(s): return s["id"] == sp["id"])[0]
+		var shoelace := G.polygon_area(data["poly"] if data.has("poly") else G.rect_poly(data["rect"]))
+		if absf(sp["area"] - shoelace) > 1e-9 or absf(sp["area"] - floors[sp["id"]]["area"]) > 1e-4:
+			_fail("%s: area of space %d does not match its geometry / 3D floor" % [tag, sp["id"]])
+		if sp["polygonal"]:
+			polygonal += 1
+			if sp["area"] > (sp["rect"] as Rect2).get_area() - 0.01:
+				_fail("%s: polygonal space %d measured as its bounding box" % [tag, sp["id"]])
+		if sp["kind"] == "courtyard" and absf(sp["area"] - 16.0) > 0.001:
+			_fail("%s: courtyard shows %.4f m²" % [tag, sp["area"]])
+	# Doors: the schematic's opening segments lie in the validated opening rectangles.
+	for d in m["doors"]:
+		var r: Rect2 = (house["openings"][d["index"]]["rect"] as Rect2).grow(1e-6)
+		if not r.has_point(d["start"]) or not r.has_point(d["end"]) or absf(d["width"] - maxf(r.size.x, r.size.y) + 2e-6) > 1e-5:
+			_fail("%s: door D%d does not match its validated opening" % [tag, d["index"]])
+	# Picking: clicking inside a room selects it and shows its data.
+	var rooms: Array = m["spaces"].filter(func(s): return s["kind"] == "room")
+	var trimmed: Array = rooms.filter(func(s): return s["polygonal"])
+	var pick: Dictionary = trimmed[0] if not trimmed.is_empty() else rooms[0]
+	var sel: Dictionary = view.select_at(view.world_to_screen(pick["centroid"]))
+	text = view.inspection_text()
+	if sel.get("kind", "") != "space" or m["spaces"][sel["index"]]["id"] != pick["id"]:
+		_fail("%s: clicking room %d selected %s" % [tag, pick["id"], sel])
+	elif not text.begins_with("[b]Selected[/b]") or not text.contains(pick["name"]) or not text.contains("Area: %.2f m²" % pick["area"]):
+		_fail("%s: selection panel does not show room %d" % [tag, pick["id"]])
+	elif pick["polygonal"] and not text.contains("(%.2f, %.2f)" % [pick["shape"][0].x, pick["shape"][0].y]):
+		_fail("%s: selection panel does not list the polygon vertices" % tag)
+	var corner: Dictionary = view.select_at(view.world_to_screen(fp[0]))
+	if corner.get("kind", "") != "vertex" or corner["index"] != 0:
+		_fail("%s: clicking P0 did not select the vertex" % tag)
+	if failures == 0:
+		print("%s check OK: %d vertices, %d spaces (%d polygonal) match the 3D model; picking works" % [tag, fp.size(), m["spaces"].size(), polygonal])
+	view.queue_free()
+
+
+## Opening the schematic of the selected house and returning to 3D must not
+## regenerate, rebuild or change the selection.
+func _schematic_switch_checks() -> void:
+	main.show_next()
+	var idx: int = main.index
+	var gen: int = main.generation
+	var builds: int = main.view3d.build_count
+	var house: Dictionary = main.houses[idx]["house"]
+	main.show_coordinates()
+	if main.mode != "schematic" or not main.schematic.visible or main.view3d.visible or not is_same(main.schematic.house, house):
+		_fail("Show Coordinates should show the schematic of the selected house")
+	main.back_to_3d()
+	main.show_coordinates()
+	main.back_to_3d()
+	if not main.view3d.visible or main.schematic.visible or main.index != idx or not is_same(main.view3d.house, house):
+		_fail("Back to 3D should return to the same selected house")
+	if main.generation != gen or main.view3d.build_count != builds or not is_same(main.houses[idx]["house"], house):
+		_fail("switching between 3D and the schematic regenerated or rebuilt the house")
+	main.show_previous()
+	if failures == 0:
+		print("schematic switch check OK: same house, no regeneration, no 3D rebuild")
 
 
 func _model_state(view: SubViewportContainer) -> Array:
@@ -314,6 +417,21 @@ func _negative_checks(base: Dictionary) -> void:
 	var box := Validator._bbox(h["footprint"])
 	h["footprint"] = Validator._rect_poly(box)
 	_expect_rejected(h, "H11", "rectangular footprint (90° corners)", "80°–110°")
+
+	# Street frontage shorter than 2.0 m (H12.1): pinch the south edge round the entrance.
+	h = base.duplicate(true)
+	var front := Validator.street_frontage(h)
+	var ent: Rect2 = h["openings"].filter(func(o): return o["kind"] == "entrance")[0]["rect"]
+	fp = h["footprint"]
+	fp[front["edge"]] = Vector2(ent.get_center().x + 0.75, front["a"].y)
+	fp[(front["edge"] + 1) % fp.size()] = Vector2(ent.get_center().x - 0.75, front["b"].y)
+	h["footprint"] = fp
+	_expect_rejected(h, "H12.1", "street frontage of 1.5 m", "frontage is 1.50 m")
+
+	# No entrance on the street frontage (H12): the street declared on the north side.
+	h = base.duplicate(true)
+	h["street_side"] = "north"
+	_expect_rejected(h, "H12", "house without direct street access", "directly onto the street")
 
 	# A corner of exactly 110° (inclusive limit) must be rejected too.
 	h = base.duplicate(true)

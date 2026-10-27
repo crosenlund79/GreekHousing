@@ -1,9 +1,11 @@
 # Ancient Greek House Generator (Godot 4 prototype)
 
 Generates Classical Greek courtyard houses of the **Olynthian pastas type** and
-shows the selected house as an interactive **3D cutaway** (or as a 2D plan).
-Every footprint has 4, 5 or 6 sides with no corner between 80° and 110°.
-Every house shown has passed the hard-rule validator (H00–H11). If a slot
+shows the selected house as an interactive **3D cutaway**, a 2D plan, or a
+**coordinate schematic** for inspecting its geometry. Every footprint has 4, 5
+or 6 sides with no corner between 80° and 110°, and at least 2.0 m of
+continuous street frontage. Every house shown has passed the hard-rule
+validator (H00–H12). If a slot
 cannot produce a valid house within 10 candidates, it shows a generation error
 and never shows an invalid house.
 
@@ -21,9 +23,10 @@ and never shows an invalid house.
   never rebuilt by rotation.
 - **Regenerate All Houses** generates and validates five new houses (guaranteed
   different from the previous set), replaces the stored set and returns to house 1.
-- **2D Plan / 3D View** switches the stage between the 3D view and the
-  original plan drawing of the same stored house.
-- The info line shows VALID H00–H11, the number of exterior sides as computed
+- **Show Coordinates** opens the coordinate schematic of the selected house;
+  **Back to 3D** returns to the 3D view. **2D Plan** shows the plan drawing.
+  Switching views never regenerates or changes the house and keeps it selected.
+- The info line shows VALID H00–H12, the number of exterior sides as computed
   by the validator from the polygon, the shape, room count and size.
 - Both views fit the house to the available area without distortion and follow
   window resizing; the button row wraps on narrow windows.
@@ -39,8 +42,10 @@ and never shows an invalid house.
 
   It generates seeded 4/5/6-sided houses and re-validates them (side count and
   corner angles recomputed from the polygon), runs negative validator checks,
-  compares the 3D meshes against the house data, and checks rotation,
-  navigation and regeneration. (Headless Godot 4.3 prints
+  compares the 3D meshes against the house data, checks that the schematic
+  shows the same geometry as the 3D meshes (vertices, shoelace areas,
+  courtyard 16 m², H11 angles, door segments) and that clicking a room selects
+  it, and checks rotation, view switching, navigation and regeneration. (Headless Godot 4.3 prints
   `Parameter "m" is null` when ArrayMeshes are freed; that is a dummy-renderer
   quirk, not a test failure.)
 
@@ -49,10 +54,12 @@ and never shows an invalid house.
 | File | Role |
 |---|---|
 | `scripts/house_generator.gd` | Builds candidates by construction, then calls the validator; bounded retries (max 10). |
-| `scripts/house_validator.gd` | `validate_house(house) -> {valid, errors, sides}`; explicit checks for H00–H11 and all prototype dimensions. |
+| `scripts/house_validator.gd` | `validate_house(house) -> {valid, errors, sides}`; explicit checks for H00–H12 and all prototype dimensions. |
+| `scripts/geometry.gd` | Shared measurements used by the validator and every view: shoelace area, edge lengths, interior angles, point-in-polygon, global→local, world→screen. |
+| `scripts/house_schematic_view.gd` | Coordinate schematic (`_draw()`) with grid, rulers, labels, picking and a scrollable inspection panel. |
 | `scripts/house_3d_view.gd` | `SubViewportContainer` with its own 3D world: meshes for the selected house only, camera orbit. |
 | `scripts/house_view.gd` | 2D plan (`_draw()`), also used for the generation-error panel. Reads data only. |
-| `scripts/main.gd` | UI: navigation, rotation, regeneration, 2D/3D toggle; stores the five results. |
+| `scripts/main.gd` | UI: navigation, rotation, regeneration, 3D / plan / schematic views; stores the five results. |
 | `tests/smoke_test.gd` | Headless smoke test. |
 
 ## Geometry model
@@ -154,6 +161,8 @@ polygon clipping against the actual footprint.
 | H09 | 4–9 rooms; known function; every room opens directly onto pastas, courtyard or passage. |
 | H10 | North-wing rooms span the full wing depth (aligned E–W divisions) and the wing (within the interior) = rooms + N–S partitions; every interior wall end meets another wall, a door gap or the exterior wall band, or ends as an anta on the pastas line; all interior walls connect to the exterior band. |
 | H11 | No interior angle of the footprint in [80°, 110°]. |
+| H12 | A verified entrance opens directly onto the street frontage: the longest footprint edge on the street line (south). |
+| H12.1 | That frontage is one continuous edge at least 2.0 m long. |
 
 ## 3D view
 
@@ -184,6 +193,42 @@ footprint and 0.8 m height, that every footprint corner is a corner of the
 exterior wall meshes, that no wall mesh covers a door or entrance gap, and that
 floors + gaps + walls cover exactly the footprint area.
 
+## Coordinate schematic
+
+![Coordinate schematic with a selected room](docs/schematic.png)
+
+**Show Coordinates** draws a technical plan of the selected house:
+
+- X/Y rulers and a metre grid (major lines every 5 m), axis labels, scale bar, north arrow.
+- The exterior footprint with every vertex labelled `P0, P1, …` and its
+  coordinates, the length of every edge, and the interior angle at every
+  vertex (red if it would break H11 — never the case for a displayed house).
+- Rooms, courtyard (green, hatched), pastas (ochre, hatched) and entrance
+  passage as outlines with ID, name and area; walls as filled shapes with their
+  real thickness; door openings as red dimension lines `D#` across the real gap;
+  the pastas–courtyard open edge dashed.
+- An inspection panel (beside the drawing, or below it on narrow screens,
+  scrollable) listing house data (validation status, sides, footprint and
+  courtyard areas, room count, street frontage), every vertex in global and
+  local coordinates, edge lengths, angles, every space (rectangle corners and
+  width × depth, or all vertices for trimmed rooms with their shoelace area),
+  the pastas' depth and relation to courtyard and wing, every door/opening
+  (end points, width, wall thickness) and every wall (centreline start → end,
+  length, thickness).
+- Click a room, the courtyard or the pastas to highlight it and show its data at
+  the top of the panel; clicking a wall or an exterior vertex works too.
+- Numbers are shown to two decimals; the data keeps full precision.
+
+There is one geometry model: the house Dictionary produced by the generator.
+The validator, the 3D view, the 2D plan and the schematic all read it, and all
+measurements come from `geometry.gd`. **Global** coordinates are the data's
+own (X east, Y south, metres). **Local** coordinates are the same points
+translated so the footprint's bounding-box top-left corner is (0, 0); the
+generator already places that corner at the origin, so the two coincide for
+these single houses. The schematic is built once per house and only redrawn
+when the selection or window size changes; no nodes are created per vertex or
+wall.
+
 ## What is historical, what is a project rule, what is an assumption
 
 **Archaeological evidence (Olynthos, c. 430–348 BCE).** Houses on the North
@@ -201,7 +246,8 @@ this prototype produces.
 
 **Project-specific mandatory constraints.** The 16 m² courtyard, the pastas
 depth range, the 4–9 room count, the 4–6-sided footprints without corners
-between 80° and 110°, a south street and the H00–H11 rules are requirements of
+between 80° and 110°, the 2.0 m street frontage, a south street and the
+H00–H12 rules are requirements of
 this project, not ancient standards. Olynthian houses within a block were
 mostly near-rectangular; the slanted and waisted footprints are project
 variations (irregular plots did occur in Greek towns, but these shapes are not

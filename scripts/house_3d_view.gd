@@ -13,6 +13,8 @@ extends SubViewportContainer
 ## about ancient wall heights. The camera orbits the house centre; rotating
 ## never touches the model.
 
+const G := preload("res://scripts/geometry.gd")
+
 const WALL_HEIGHT := 0.8
 const ELEVATION := 55.0       # camera elevation above the horizon, degrees
 const FOV := 32.0             # vertical field of view, degrees
@@ -322,33 +324,24 @@ static func mesh_outline(mi: MeshInstance3D) -> Dictionary:
 
 
 static func _shape(item: Dictionary) -> PackedVector2Array:
-	return item["poly"] if item.has("poly") else _rect_poly(item["rect"])
+	return G.shape(item)
 
 
 static func _rect_poly(r: Rect2) -> PackedVector2Array:
-	return PackedVector2Array([r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)])
+	return G.rect_poly(r)
 
 
 static func _bbox(poly: PackedVector2Array) -> Rect2:
-	var r := Rect2(poly[0], Vector2.ZERO)
-	for p in poly:
-		r = r.expand(p)
-	return r
+	return G.bbox(poly)
 
 
 static func _signed_area(poly: PackedVector2Array) -> float:
-	var a := 0.0
-	for i in poly.size():
-		a += poly[i].cross(poly[(i + 1) % poly.size()])
-	return a / 2.0
+	return G.signed_area(poly)
 
 
 static func _poly_area(poly: PackedVector2Array) -> float:
-	return absf(_signed_area(poly))
+	return G.polygon_area(poly)
 
 
 static func _centroid(poly: PackedVector2Array) -> Vector2:
-	var c := Vector2.ZERO
-	for p in poly:
-		c += p
-	return c / poly.size()
+	return G.centroid(poly)

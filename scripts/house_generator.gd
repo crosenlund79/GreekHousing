@@ -18,7 +18,7 @@ extends RefCounted
 ## The courtyard, entrance passage and all doors are never clipped.
 ##
 ## Every candidate is then checked by house_validator.gd; only a house that
-## passes all hard rules H00–H11 is ever returned as valid.
+## passes all hard rules H00–H12 is ever returned as valid.
 ##
 ## The layout runs on an integer centimetre grid (5 cm steps) so shared edges
 ## are exact; geometry is converted to metres when emitted. Only the slanted

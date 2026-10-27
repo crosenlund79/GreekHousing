@@ -1,12 +1,14 @@
 extends RefCounted
-## Hard-rule validator for generated house data (rules H00–H11).
+## Hard-rule validator for generated house data (rules H00–H12).
 ##
 ## Works only on the structured house Dictionary produced by house_generator.gd
 ## (or built by hand in tests). It never looks at rendering, and it derives
 ## every checked quantity (side count, areas, wing orientation, access) from
 ## the geometry itself rather than from descriptive metadata.
 ## A house is valid only when validate_house() returns valid == true.
-## Rules H00–H11; H11 forbids footprint corners between 80° and 110°.
+## Rules H00–H12; H11 forbids footprint corners between 80° and 110°, H12
+## requires the entrance on a continuous street frontage of at least 2.0 m.
+## Plane-geometry measurements come from geometry.gd, shared with every view.
 ##
 ## Coordinates are metres: X grows east, Y grows south, north is up.
 ##
@@ -19,6 +21,8 @@ extends RefCounted
 ##             axis is the direction of travel through the opening; b == STREET for the entrance.
 ## `rect` is the exact shape unless `poly` is given, in which case `rect` is its
 ## bounding box and `poly` the exact shape (clipped rooms, mitred exterior walls).
+
+const G := preload("res://scripts/geometry.gd")
 
 # --- Configurable prototype dimensions (project assumptions, not historical norms) ---
 const EXT_WALL := 0.50
@@ -41,6 +45,7 @@ const MIN_CLIPPED_CORNER := 60.0      # degrees; no spiky corners where a slante
 const FORBIDDEN_ANGLE_MIN := 80.0     # H11: footprint interior angles in [80°, 110°] are forbidden
 const FORBIDDEN_ANGLE_MAX := 110.0
 const ANGLE_EPS := 1e-6
+const MIN_STREET_FRONTAGE := 2.0      # H12.1: continuous street frontage, metres
 const ROOM_TYPES := ["Domestic room", "Storage", "Kitchen / hearth", "Andron", "Workroom"]
 
 const STREET := -1
@@ -68,6 +73,7 @@ static func validate_house(house: Dictionary) -> Dictionary:
 	_check_h09(house, ctx, errors)
 	_check_h10(house, ctx, errors)
 	_check_h11(ctx, errors)
+	_check_h12(house, ctx, errors)
 	return {"valid": errors.is_empty(), "errors": errors, "sides": sides}
 
 
@@ -86,14 +92,34 @@ static func count_sides(poly: PackedVector2Array) -> int:
 ## Interior angle (degrees) at every vertex of a simple polygon; reflex
 ## corners are > 180°. Computed from the geometry, for H11 and the tests.
 static func interior_angles(poly: PackedVector2Array) -> Array:
-	var orient := 1.0 if _signed_area(poly) > 0.0 else -1.0
-	var out: Array = []
-	for i in poly.size():
-		var e0 := poly[i] - poly[i - 1]
-		var e1 := poly[(i + 1) % poly.size()] - poly[i]
-		var turn := rad_to_deg(atan2(e0.cross(e1), e0.dot(e1)))
-		out.append(180.0 - turn * orient)
-	return out
+	return G.interior_angles(poly)
+
+
+## True if an interior angle violates H11 (inside 80°–110°, inclusive).
+static func forbidden_angle(a: float) -> bool:
+	return a >= FORBIDDEN_ANGLE_MIN - ANGLE_EPS and a <= FORBIDDEN_ANGLE_MAX + ANGLE_EPS
+
+
+## Street frontage (H12): the longest footprint edge lying on the street line
+## (the outermost boundary line on the street side). Edges cannot be collinear
+## neighbours (H00), so one edge is one continuous stretch.
+## Returns {edge: index or -1, length, a, b}.
+static func street_frontage(house: Dictionary) -> Dictionary:
+	var fp: PackedVector2Array = house["footprint"]
+	var box := G.bbox(fp)
+	var best := {"edge": -1, "length": 0.0, "a": Vector2.ZERO, "b": Vector2.ZERO}
+	for i in fp.size():
+		var a := fp[i]
+		var b := fp[(i + 1) % fp.size()]
+		var on_line := false
+		match house["street_side"]:
+			"south": on_line = _near(a.y, box.end.y) and _near(b.y, box.end.y)
+			"north": on_line = _near(a.y, box.position.y) and _near(b.y, box.position.y)
+			"east": on_line = _near(a.x, box.end.x) and _near(b.x, box.end.x)
+			"west": on_line = _near(a.x, box.position.x) and _near(b.x, box.position.x)
+		if on_line and a.distance_to(b) > best["length"]:
+			best = {"edge": i, "length": a.distance_to(b), "a": a, "b": b}
+	return best
 
 
 ## Polygon shrunk by distance d (simple polygons whose inset keeps the same
@@ -746,8 +772,32 @@ static func _check_h11(ctx: Dictionary, errors: Array) -> void:
 	var angles := interior_angles(ctx["footprint"])
 	for i in angles.size():
 		var a: float = angles[i]
-		if a >= FORBIDDEN_ANGLE_MIN - ANGLE_EPS and a <= FORBIDDEN_ANGLE_MAX + ANGLE_EPS:
+		if forbidden_angle(a):
 			errors.append("H11: footprint corner %d has an interior angle of %.2f° (80°–110° is forbidden)" % [i, a])
+
+
+# --------------------------------------------------------------------------
+# H12 — Direct street access; H12.1 — at least 2.0 m continuous frontage
+# --------------------------------------------------------------------------
+
+static func _check_h12(house: Dictionary, ctx: Dictionary, errors: Array) -> void:
+	var front := street_frontage(house)
+	if front["edge"] < 0:
+		errors.append("H12: footprint has no edge on the %s street boundary" % house["street_side"])
+		return
+	if front["length"] < MIN_STREET_FRONTAGE - EPS:
+		errors.append("H12.1: continuous street frontage is %.2f m (minimum %.1f m)" % [front["length"], MIN_STREET_FRONTAGE])
+	# Direct access: a verified entrance whose outer face lies on the frontage edge.
+	var direct := false
+	for e in ctx["edges"]:
+		if e["kind"] != "entrance":
+			continue
+		var op: Dictionary = house["openings"][e["index"]]
+		for low in [true, false]:
+			var face := _face(op["rect"], op["axis"], low)
+			direct = direct or _segment_on_boundary(face[0], face[1], PackedVector2Array([front["a"], front["b"]]))
+	if not direct:
+		errors.append("H12: no entrance opens directly onto the street frontage")
 
 
 # --------------------------------------------------------------------------
@@ -838,31 +888,23 @@ static func _touch(a: Rect2, b: Rect2) -> bool:
 
 
 static func _shape(item: Dictionary) -> PackedVector2Array:
-	return item["poly"] if item.has("poly") else _rect_poly(item["rect"])
+	return G.shape(item)
 
 
 static func _area(item: Dictionary) -> float:
-	return absf(_signed_area(item["poly"])) if item.has("poly") else (item["rect"] as Rect2).get_area()
+	return G.item_area(item)
 
 
 static func _rect_poly(r: Rect2) -> PackedVector2Array:
-	return PackedVector2Array([r.position, Vector2(r.end.x, r.position.y), r.end, Vector2(r.position.x, r.end.y)])
+	return G.rect_poly(r)
 
 
 static func _bbox(poly: PackedVector2Array) -> Rect2:
-	var r := Rect2(poly[0], Vector2.ZERO)
-	for p in poly:
-		r = r.expand(p)
-	return r
+	return G.bbox(poly)
 
 
 static func _signed_area(poly: PackedVector2Array) -> float:
-	var a := 0.0
-	for i in poly.size():
-		var p := poly[i]
-		var q := poly[(i + 1) % poly.size()]
-		a += float(p.x) * q.y - float(q.x) * p.y
-	return a * 0.5
+	return G.signed_area(poly)
 
 
 static func _overlap_area(a: PackedVector2Array, b: PackedVector2Array) -> float:

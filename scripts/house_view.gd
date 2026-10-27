@@ -3,6 +3,8 @@ extends Control
 ## house data and never generates or validates geometry itself.
 ## The plan is scaled uniformly to fit the control, so it never distorts.
 
+const G := preload("res://scripts/geometry.gd")
+
 const INK := Color(0.16, 0.13, 0.11)
 const PAPER := Color(0.99, 0.98, 0.95)
 const EXT_WALL_COLOR := Color(0.23, 0.18, 0.15)
@@ -104,7 +106,7 @@ func _draw_heading(font: Font, heading: String, detail: String) -> void:
 	if detail != "":
 		var badge := Rect2(x, 10, 112, 22)
 		draw_rect(badge, Color(0.2, 0.55, 0.28))
-		draw_string(font, Vector2(badge.position.x, 26), "VALID H00–H11", HORIZONTAL_ALIGNMENT_CENTER, badge.size.x, 12, Color.WHITE)
+		draw_string(font, Vector2(badge.position.x, 26), "VALID H00–H12", HORIZONTAL_ALIGNMENT_CENTER, badge.size.x, 12, Color.WHITE)
 		draw_string(font, Vector2(12, 48), detail, HORIZONTAL_ALIGNMENT_LEFT, size.x - 60.0, 13, Color(INK, 0.8))
 
 
@@ -168,14 +170,8 @@ func _space_area(sp: Dictionary) -> float:
 
 
 static func _poly_area(poly: PackedVector2Array) -> float:
-	var a := 0.0
-	for i in poly.size():
-		a += poly[i].cross(poly[(i + 1) % poly.size()])
-	return absf(a) * 0.5
+	return G.polygon_area(poly)
 
 
 static func _bbox(poly: PackedVector2Array) -> Rect2:
-	var r := Rect2(poly[0], Vector2.ZERO)
-	for p in poly:
-		r = r.expand(p)
-	return r
+	return G.bbox(poly)

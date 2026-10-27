@@ -12,19 +12,26 @@ Godot 4 (GDScript) prototype that generates Olynthian pastas-type Greek house pl
 
 ## Non-negotiable rules
 
-- Hard rules H00–H11 are absolute (H00 = 4–6-sided simple footprint polygon,
-  H11 = no footprint interior angle in [80°, 110°], inclusive). Never weaken, skip or bypass a validator
+- Hard rules H00–H12 are absolute (H00 = 4–6-sided simple footprint polygon,
+  H11 = no footprint interior angle in [80°, 110°], inclusive, H12 = entrance
+  directly on the street frontage, H12.1 = frontage ≥ 2.0 m continuous). Never weaken, skip or bypass a validator
   check to make generation succeed; fix the generator instead.
 - Only houses for which `house_validator.gd::validate_house` returns
   `valid == true` may be displayed as plans. Failures show an error slot.
 - Retries are bounded (`MAX_ATTEMPTS = 10` in `house_generator.gd`).
 - Keep generation, validation and rendering separate: the validator works only on
   the house Dictionary; `house_view.gd` only draws it.
+- One geometry model: the house Dictionary. Generator, validator, 3D view, 2D
+  plan and coordinate schematic all read it; measurements go through
+  `scripts/geometry.gd` (area, edges, angles, point-in-polygon, local
+  coordinates, world→screen). Never keep a second copy of the geometry.
 - Validate against actual geometry, never metadata: side count from the polygon,
   northern wing from the rooms north of the pastas, areas from shapes.
 - UI: five houses are generated at startup and on "Regenerate All Houses" only.
   ◀ / ▶ just change `main.index` (wrapping) and rebuild the 3D model of the
   selected house; they must never regenerate. Rotation only moves the camera.
+  "Show Coordinates" / "Back to 3D" / "2D Plan" only change `main.mode`; they
+  never regenerate or rebuild, and the selected house stays selected.
 - The 3D view (`house_3d_view.gd`) builds meshes only from validated data
   (`validation.valid`), one floor per space, one solid per wall record — never
   invent walls or roofs. Only the selected house's meshes exist.
